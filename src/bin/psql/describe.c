@@ -1636,9 +1636,9 @@ describeOneTableDetails(const char *schemaname,
 				indexdef_col = -1,
 				fdwopts_col = -1,
 				attstorage_col = -1,
+				attcompression_col = -1,
 				attstattarget_col = -1,
-				attdescr_col = -1,
-				attcompression_col = -1;
+				attdescr_col = -1;
 	int			numrows;
 	struct
 	{
@@ -2055,7 +2055,7 @@ describeOneTableDetails(const char *schemaname,
 		appendPQExpBufferStr(&buf, ",\n  a.attstorage");
 		attstorage_col = cols++;
 
-		/* compression info */
+		/* compression info, if relevant to relkind */
 		if (pset.sversion >= 140000 &&
 			!pset.hide_compression &&
 			(tableinfo.relkind == RELKIND_RELATION ||
@@ -2259,7 +2259,7 @@ describeOneTableDetails(const char *schemaname,
 		if (fdwopts_col >= 0)
 			printTableAddCell(&cont, PQgetvalue(res, i, fdwopts_col), false, false);
 
-		/* Storage and Description */
+		/* Storage mode, if relevant */
 		if (attstorage_col >= 0)
 		{
 			char	   *storage = PQgetvalue(res, i, attstorage_col);
@@ -2273,7 +2273,7 @@ describeOneTableDetails(const char *schemaname,
 							  false, false);
 		}
 
-		/* Column compression. */
+		/* Column compression, if relevant */
 		if (attcompression_col >= 0)
 		{
 			char	   *compression = PQgetvalue(res, i, attcompression_col);
@@ -2934,7 +2934,7 @@ describeOneTableDetails(const char *schemaname,
 
 					if (has_some && !has_all)
 					{
-						appendPQExpBuffer(&buf, " (");
+						appendPQExpBufferStr(&buf, " (");
 
 						/* options */
 						if (has_ndistinct)
@@ -2954,7 +2954,7 @@ describeOneTableDetails(const char *schemaname,
 							appendPQExpBuffer(&buf, "%smcv", gotone ? ", " : "");
 						}
 
-						appendPQExpBuffer(&buf, ")");
+						appendPQExpBufferChar(&buf, ')');
 					}
 
 					appendPQExpBuffer(&buf, " ON %s FROM %s",
@@ -3577,7 +3577,7 @@ describeOneTableDetails(const char *schemaname,
 					child_relkind == RELKIND_PARTITIONED_INDEX)
 					appendPQExpBufferStr(&buf, ", PARTITIONED");
 				if (strcmp(PQgetvalue(result, i, 2), "t") == 0)
-					appendPQExpBuffer(&buf, " (DETACH PENDING)");
+					appendPQExpBufferStr(&buf, " (DETACH PENDING)");
 				if (i < tuples - 1)
 					appendPQExpBufferChar(&buf, ',');
 
@@ -6389,7 +6389,7 @@ describeSubscriptions(const char *pattern, bool verbose)
 	PGresult   *res;
 	printQueryOpt myopt = pset.popt;
 	static const bool translate_columns[] = {false, false, false, false,
-	false, false, false, false};
+	false, false, false, false, false};
 
 	if (pset.sversion < 100000)
 	{
@@ -6422,6 +6422,12 @@ describeSubscriptions(const char *pattern, bool verbose)
 							  ", substream AS \"%s\"\n",
 							  gettext_noop("Binary"),
 							  gettext_noop("Streaming"));
+
+		/* Two_phase is only supported in v15 and higher */
+		if (pset.sversion >= 150000)
+			appendPQExpBuffer(&buf,
+							  ", subtwophasestate AS \"%s\"\n",
+							  gettext_noop("Two phase commit"));
 
 		appendPQExpBuffer(&buf,
 						  ",  subsynccommit AS \"%s\"\n"

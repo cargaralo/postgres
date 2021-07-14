@@ -286,8 +286,9 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 	else
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not a table or view",
-						RelationGetRelationName(rel))));
+				 errmsg("relation \"%s\" cannot have triggers",
+						RelationGetRelationName(rel)),
+				 errdetail_relkind_not_supported(rel->rd_rel->relkind)));
 
 	if (!allowSystemTableMods && IsSystemRelation(rel))
 		ereport(ERROR,
@@ -1262,8 +1263,9 @@ RemoveTriggerById(Oid trigOid)
 		rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not a table, view, or foreign table",
-						RelationGetRelationName(rel))));
+				 errmsg("relation \"%s\" cannot have triggers",
+						RelationGetRelationName(rel)),
+				 errdetail_relkind_not_supported(rel->rd_rel->relkind)));
 
 	if (!allowSystemTableMods && IsSystemRelation(rel))
 		ereport(ERROR,
@@ -1368,8 +1370,9 @@ RangeVarCallbackForRenameTrigger(const RangeVar *rv, Oid relid, Oid oldrelid,
 		form->relkind != RELKIND_PARTITIONED_TABLE)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is not a table, view, or foreign table",
-						rv->relname)));
+				 errmsg("relation \"%s\" cannot have triggers",
+						rv->relname),
+				 errdetail_relkind_not_supported(form->relkind)));
 
 	/* you must own the table to rename one of its triggers */
 	if (!pg_class_ownercheck(relid, GetUserId()))
@@ -4219,6 +4222,8 @@ afterTriggerInvokeEvents(AfterTriggerEventList *events,
 				{
 					rInfo = ExecGetTriggerResultRel(estate, evtshared->ats_relid);
 					rel = rInfo->ri_RelationDesc;
+					/* Catch calls with insufficient relcache refcounting */
+					Assert(!RelationHasReferenceCountZero(rel));
 					trigdesc = rInfo->ri_TrigDesc;
 					finfo = rInfo->ri_TrigFunctions;
 					instr = rInfo->ri_TrigInstrument;

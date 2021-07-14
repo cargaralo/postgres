@@ -752,13 +752,19 @@ set_plan_refs(PlannerInfo *root, Plan *plan, int rtoffset)
 			set_hash_references(root, plan, rtoffset);
 			break;
 
-		case T_ResultCache:
+		case T_Memoize:
 			{
-				ResultCache *rcplan = (ResultCache *) plan;
+				Memoize    *mplan = (Memoize *) plan;
 
-				rcplan->param_exprs = fix_scan_list(root, rcplan->param_exprs,
-													rtoffset,
-													NUM_EXEC_TLIST(plan));
+				/*
+				 * Memoize does not evaluate its targetlist.  It just uses the
+				 * same targetlist from its outer subnode.
+				 */
+				set_dummy_tlist_references(plan, rtoffset);
+
+				mplan->param_exprs = fix_scan_list(root, mplan->param_exprs,
+												   rtoffset,
+												   NUM_EXEC_TLIST(plan));
 				break;
 			}
 
@@ -1681,6 +1687,9 @@ fix_expr_common(PlannerInfo *root, Node *node)
 
 		if (!OidIsValid(saop->hashfuncid))
 			record_plan_function_dependency(root, saop->hashfuncid);
+
+		if (!OidIsValid(saop->negfuncid))
+			record_plan_function_dependency(root, saop->negfuncid);
 	}
 	else if (IsA(node, Const))
 	{

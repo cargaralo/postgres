@@ -775,6 +775,7 @@ _copyForeignScan(const ForeignScan *from)
 	 * copy remainder of node
 	 */
 	COPY_SCALAR_FIELD(operation);
+	COPY_SCALAR_FIELD(resultRelation);
 	COPY_SCALAR_FIELD(fs_server);
 	COPY_NODE_FIELD(fdw_exprs);
 	COPY_NODE_FIELD(fdw_private);
@@ -782,7 +783,6 @@ _copyForeignScan(const ForeignScan *from)
 	COPY_NODE_FIELD(fdw_recheck_quals);
 	COPY_BITMAPSET_FIELD(fs_relids);
 	COPY_SCALAR_FIELD(fsSystemCol);
-	COPY_SCALAR_FIELD(resultRelation);
 
 	return newnode;
 }
@@ -950,12 +950,12 @@ _copyMaterial(const Material *from)
 
 
 /*
- * _copyResultCache
+ * _copyMemoize
  */
-static ResultCache *
-_copyResultCache(const ResultCache *from)
+static Memoize *
+_copyMemoize(const Memoize *from)
 {
-	ResultCache *newnode = makeNode(ResultCache);
+	Memoize    *newnode = makeNode(Memoize);
 
 	/*
 	 * copy node superclass fields
@@ -1718,6 +1718,7 @@ _copyScalarArrayOpExpr(const ScalarArrayOpExpr *from)
 	COPY_SCALAR_FIELD(opno);
 	COPY_SCALAR_FIELD(opfuncid);
 	COPY_SCALAR_FIELD(hashfuncid);
+	COPY_SCALAR_FIELD(negfuncid);
 	COPY_SCALAR_FIELD(useOr);
 	COPY_SCALAR_FIELD(inputcollid);
 	COPY_NODE_FIELD(args);
@@ -3407,6 +3408,7 @@ _copyObjectWithArgs(const ObjectWithArgs *from)
 
 	COPY_NODE_FIELD(objname);
 	COPY_NODE_FIELD(objargs);
+	COPY_NODE_FIELD(objfuncargs);
 	COPY_SCALAR_FIELD(args_unspecified);
 
 	return newnode;
@@ -3478,6 +3480,7 @@ _copyCallStmt(const CallStmt *from)
 
 	COPY_NODE_FIELD(funccall);
 	COPY_NODE_FIELD(funcexpr);
+	COPY_NODE_FIELD(outargs);
 
 	return newnode;
 }
@@ -3678,6 +3681,7 @@ _copyCreateStatsStmt(const CreateStatsStmt *from)
 	COPY_NODE_FIELD(exprs);
 	COPY_NODE_FIELD(relations);
 	COPY_STRING_FIELD(stxcomment);
+	COPY_SCALAR_FIELD(transformed);
 	COPY_SCALAR_FIELD(if_not_exists);
 
 	return newnode;
@@ -5075,8 +5079,8 @@ copyObjectImpl(const void *from)
 		case T_Material:
 			retval = _copyMaterial(from);
 			break;
-		case T_ResultCache:
-			retval = _copyResultCache(from);
+		case T_Memoize:
+			retval = _copyMemoize(from);
 			break;
 		case T_Sort:
 			retval = _copySort(from);
