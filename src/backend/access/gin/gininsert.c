@@ -1527,10 +1527,10 @@ GinBufferStoreTuple(GinBuffer *buffer, GinTuple *tup)
 		 * still pass 0 as number of elements in that array though.
 		 */
 		if (buffer->items == NULL)
-			buffer->items = palloc((buffer->nitems + tup->nitems) * sizeof(ItemPointerData));
+			buffer->items = palloc_array(ItemPointerData, buffer->nitems + tup->nitems);
 		else
-			buffer->items = repalloc(buffer->items,
-									 (buffer->nitems + tup->nitems) * sizeof(ItemPointerData));
+			buffer->items = repalloc_array(buffer->items,
+										   ItemPointerData, buffer->nitems + tup->nitems);
 
 		new = ginMergeItemPointers(&buffer->items[buffer->nfrozen], /* first unfrozen */
 								   (buffer->nitems - buffer->nfrozen),	/* num of unfrozen */
@@ -1875,9 +1875,6 @@ _gin_process_worker_data(GinBuildState *state, Tuplesortstate *worker_sort,
 
 	tuplesort_performsort(state->bs_worker_sort);
 
-	/* reset the number of GIN tuples produced by this worker */
-	state->bs_numtuples = 0;
-
 	if (progress)
 		pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
 									 PROGRESS_GIN_PHASE_MERGE_1);
@@ -2158,6 +2155,11 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* initialize the GIN build state */
 	initGinState(&buildstate.ginstate, indexRel);
 	buildstate.indtuples = 0;
+
+	/* Initialize counters used to report tuple counts to the leader */
+	buildstate.bs_numtuples = 0;
+	buildstate.bs_reltuples = 0;
+
 	memset(&buildstate.buildStats, 0, sizeof(GinStatsData));
 	memset(&buildstate.tid, 0, sizeof(ItemPointerData));
 

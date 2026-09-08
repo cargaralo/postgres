@@ -340,7 +340,7 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
 
      <row>
       <entry><structname>pg_stat_recovery</structname><indexterm><primary>pg_stat_recovery</primary></indexterm></entry>
-      <entry>Only one row, showing statistics about the state of recovery.
+      <entry>At most one row, showing statistics about the recovery state.
        See <link linkend="monitoring-pg-stat-recovery-view">
        <structname>pg_stat_recovery</structname></link> for details.
       </entry>
@@ -417,7 +417,7 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
       <entry><structname>pg_stat_progress_repack</structname><indexterm><primary>pg_stat_progress_repack</primary></indexterm></entry>
       <entry>One row for each backend running <command>REPACK</command>,
        <command>CLUSTER</command> or <command>VACUUM FULL</command>, showing current progress.
-       <xref linkend="repack-progress-reporting"/>.
+       See <xref linkend="repack-progress-reporting"/>.
       </entry>
      </row>
 
@@ -433,6 +433,16 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
       <entry><structname>pg_stat_progress_copy</structname><indexterm><primary>pg_stat_progress_copy</primary></indexterm></entry>
       <entry>One row for each backend running <command>COPY</command>, showing current progress.
        See <xref linkend="copy-progress-reporting"/>.
+      </entry>
+     </row>
+
+     <row>
+      <entry><structname>pg_stat_progress_data_checksums</structname><indexterm><primary>pg_stat_progress_data_checksums</primary></indexterm></entry>
+      <entry>One row for the data checksum launcher process while data
+       checksums are being enabled or disabled.  When enabling data
+       checksums, the view also has one row for each worker process,
+       showing current progress.
+       See <xref linkend="data-checksum-progress-reporting"/>.
       </entry>
      </row>
     </tbody>
@@ -507,6 +517,16 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
        See <link linkend="monitoring-pg-stat-io-view">
        <structname>pg_stat_io</structname></link> for details.
      </entry>
+     </row>
+
+     <row>
+      <entry><structname>pg_stat_kind_info</structname><indexterm><primary>pg_stat_kind_info</primary></indexterm></entry>
+      <entry>
+       One row for each registered statistics kind, showing information
+       about each kind.
+       See <link linkend="monitoring-pg-stat-kind-info-view">
+       <structname>pg_stat_kind_info</structname></link> for details.
+      </entry>
      </row>
 
      <row>
@@ -1037,16 +1057,161 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
        <structfield>backend_type</structfield> <type>text</type>
       </para>
       <para>
-       Type of current backend. Possible types are
-       <literal>autovacuum launcher</literal>, <literal>autovacuum worker</literal>,
-       <literal>logical replication launcher</literal>,
-       <literal>logical replication worker</literal>,
-       <literal>parallel worker</literal>, <literal>background writer</literal>,
-       <literal>client backend</literal>, <literal>checkpointer</literal>,
-       <literal>archiver</literal>, <literal>standalone backend</literal>,
-       <literal>startup</literal>, <literal>walreceiver</literal>,
-       <literal>walsender</literal>, <literal>walwriter</literal> and
-       <literal>walsummarizer</literal>.
+       Type of current backend. Possible types are:
+       <itemizedlist>
+        <listitem>
+         <para>
+          <literal>archiver</literal>: The WAL archiver, active when
+          <xref linkend="guc-archive-mode"/> is enabled.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>autovacuum launcher</literal>: The background process that
+          launches autovacuum workers, active when
+          <xref linkend="guc-autovacuum"/> is <literal>on</literal>.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>autovacuum worker</literal>: A background process running
+          <command>VACUUM</command> or <command>ANALYZE</command> on a single
+          table.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>background writer</literal>: The background process that
+          makes sure that there are enough clean buffers in shared buffers.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>checkpointer</literal>: The background process that
+          performs <link linkend="wal-configuration">checkpoints</link>
+          regularly.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>client backend</literal>: The server process performing
+          work for a regular database connection.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>datachecksums launcher</literal>: The background process
+          that launches data checksum workers.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>datachecksums worker</literal>: A background process that
+          calculates data checksums for all pages in one database.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>io worker</literal>: A background process performing
+          asynchronous I/O, active when <xref linkend="guc-io-method"/> is set
+          to <literal>worker</literal>.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>logical replication apply worker</literal>: A background
+          process that applies data modifications on a logical subscriber.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>logical replication launcher</literal>: The background
+          process that launches logical replication worker processes for
+          subscriptions.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>logical replication parallel worker</literal>: A background
+          process that applies data modifications on a logical subscriber
+          for a subscription with <literal>streaming = parallel</literal>.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>logical replication sequencesync worker</literal>: A
+          background process that replicates sequence data on a logical
+          subscriber.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>logical replication tablesync worker</literal>: A
+          background process that copies table data on a logical subscriber
+          for a subscription with <literal>copy_data = true</literal>.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>parallel worker</literal>: A background process that helps
+          a backend process to perform operations in parallel.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>REPACK decoding worker</literal>: A background process that
+          decodes WAL for <command>REPACK (CONCURRENTLY)</command>.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>slotsync worker</literal>: The background process that
+          synchronizes logical replication slots on a streaming replication
+          standby server, active when <xref linkend="guc-sync-replication-slots"/>
+          is set to <literal>on</literal>.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>standalone backend</literal>: The backend process when
+          <productname>PostgreSQL</productname> was started in
+          <xref linkend="app-postgres-single-user"/>.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>startup</literal>: The background process that replays WAL
+          during crash recovery, archive recovery or streaming replication.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>walreceiver</literal>: The background process that receives
+          WAL records from a WAL sender, active in streaming replication
+          standby mode.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>walsender</literal>: A background process that sends WAL
+          records to receivers (during streaming replication) or decodes WAL
+          and sends the decoded information (during logical replication).
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>walsummarizer</literal>: The background process that
+          creates summaries from WAL for use with incremental backup, active
+          when <xref linkend="guc-summarize-wal"/> is <literal>on</literal>.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>walwriter</literal>: The background process that persists
+          WAL records from WAL buffers to disk.
+         </para>
+        </listitem>
+       </itemizedlist>
        In addition, background workers registered by extensions may have
        additional types.
       </para></entry>
@@ -1196,11 +1361,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
      Extensions can add <literal>Extension</literal>,
      <literal>InjectionPoint</literal>, and <literal>LWLock</literal> events
      to the lists shown in <xref linkend="wait-event-extension-table"/> and
-     <xref linkend="wait-event-lwlock-table"/>. In some cases, the name
-     of an <literal>LWLock</literal> assigned by an extension will not be
-     available in all server processes.  It might be reported as just
-     <quote><literal>extension</literal></quote> rather than the
-     extension-assigned name.
+     <xref linkend="wait-event-lwlock-table"/>.
     </para>
    </note>
  </sect2>
@@ -1955,9 +2116,11 @@ description | Waiting for a newly initialized WAL file to reach durable storage
   </indexterm>
 
   <para>
-   The <structname>pg_stat_recovery</structname> view will contain only
+   The <structname>pg_stat_recovery</structname> view will contain at most
    one row, showing statistics about the recovery state of the startup
-   process. This view returns no row when the server is not in recovery.
+   process.  This view returns no rows when the server is not in recovery
+   or the user does not have privileges of the
+   <literal>pg_read_all_stats</literal> role.
   </para>
 
   <table id="pg-stat-recovery-view" xreflabel="pg_stat_recovery">
@@ -1999,8 +2162,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <structfield>last_replayed_end_lsn</structfield> <type>pg_lsn</type>
       </para>
       <para>
-       End write-ahead log location of the last successfully replayed
-       WAL record.
+       End write-ahead log location, plus one, of the last successfully
+       replayed WAL record.
       </para></entry>
      </row>
 
@@ -2029,18 +2192,20 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <structfield>replay_end_tli</structfield> <type>integer</type>
       </para>
       <para>
-       Timeline of the WAL record currently being replayed.
+       Timeline of the WAL record currently being replayed.  When no record
+       is being actively replayed, equals
+       <structfield>last_replayed_tli</structfield>.
       </para></entry>
      </row>
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-        <structfield>recovery_last_xact_time</structfield> <type>timestamp with time zone</type>
-       </para>
-       <para>
-        Timestamp of the last transaction commit or abort replayed during
-        recovery. This is the time at which the commit or abort WAL record
-        for that transaction was generated on the primary.
+       <structfield>recovery_last_xact_time</structfield> <type>timestamp with time zone</type>
+      </para>
+      <para>
+       Timestamp of the last transaction commit or abort record replayed
+       during recovery.  This is the time at which the commit or abort WAL
+       record for that transaction was generated on the primary.
       </para></entry>
      </row>
 
@@ -2050,8 +2215,9 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </para>
       <para>
        Time when the startup process observed that replay had caught up
-       with the latest received WAL chunk.  Used in recovery-conflict
-       timing and replay/apply-lag diagnostics.  NULL if not yet
+       with the latest WAL chunk received from streaming replication.
+       Used in recovery-conflict timing and replay/apply-lag diagnostics.
+       NULL if streaming WAL has not yet been received or the time is not
        available.
       </para></entry>
      </row>
@@ -2303,8 +2469,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </para>
       <para>
        Process ID of the leader apply worker if this process is a parallel
-       apply worker; NULL if this process is a leader apply worker or a table
-       synchronization worker
+       apply worker; NULL if this process is a leader apply worker, a table
+       synchronization worker or a sequence synchronization worker
       </para></entry>
      </row>
 
@@ -2314,7 +2480,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </para>
       <para>
        OID of the relation that the worker is synchronizing; NULL for the
-       leader apply worker and parallel apply workers
+       leader apply worker, parallel apply workers and the sequence
+       synchronization worker
       </para></entry>
      </row>
 
@@ -2324,7 +2491,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </para>
       <para>
        Last write-ahead log location received, the initial value of
-       this field being 0; NULL for parallel apply workers
+       this field being 0; NULL for parallel apply workers and the sequence
+       synchronization worker
       </para></entry>
      </row>
 
@@ -2334,7 +2502,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </para>
       <para>
        Send time of last message received from origin WAL sender; NULL for
-       parallel apply workers
+       parallel apply workers and the sequence synchronization worker
       </para></entry>
      </row>
 
@@ -2344,7 +2512,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </para>
       <para>
        Receipt time of last message received from origin WAL sender; NULL for
-       parallel apply workers
+       parallel apply workers and the sequence synchronization worker
       </para></entry>
      </row>
 
@@ -2354,7 +2522,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </para>
       <para>
        Last write-ahead log location reported to origin WAL sender; NULL for
-       parallel apply workers
+       parallel apply workers and the sequence synchronization worker
       </para></entry>
      </row>
 
@@ -2364,7 +2532,8 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </para>
       <para>
        Time of last write-ahead log location reported to origin WAL
-       sender; NULL for parallel apply workers
+       sender; NULL for parallel apply workers and the sequence synchronization
+       worker
       </para></entry>
      </row>
     </tbody>
@@ -3032,7 +3201,9 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         <varname>object</varname> is not <literal>wal</literal>,
         or if <xref linkend="guc-track-wal-io-timing"/> is enabled
         and <varname>object</varname> is <literal>wal</literal>,
-        otherwise zero)
+        otherwise zero). This may include time spent waiting for a
+        read started by another backend. In that case
+        <structfield>reads</structfield> may still be zero.
        </para>
       </entry>
      </row>
@@ -3303,6 +3474,124 @@ description | Waiting for a newly initialized WAL file to reach durable storage
  </sect2>
 
 
+ <sect2 id="monitoring-pg-stat-kind-info-view">
+  <title><structname>pg_stat_kind_info</structname></title>
+
+  <indexterm>
+   <primary>pg_stat_kind_info</primary>
+  </indexterm>
+
+  <para>
+   The <structname>pg_stat_kind_info</structname> view contains one row for
+   each registered statistics kind, including both built-in and custom kinds.
+  </para>
+
+  <table id="pg-stat-kind-info-view" xreflabel="pg_stat_kind_info">
+   <title><structname>pg_stat_kind_info</structname> View</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        Column Type
+       </para>
+       <para>
+        Description
+       </para>
+      </entry>
+     </row>
+    </thead>
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>id</structfield> <type>integer</type>
+       </para>
+       <para>
+        Numeric identifier of the statistics kind.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>name</structfield> <type>text</type>
+       </para>
+       <para>
+        Name of the statistics kind.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>builtin</structfield> <type>boolean</type>
+       </para>
+       <para>
+        True if this is a built-in statistics kind, false if it was registered
+        by an extension.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>fixed_amount</structfield> <type>boolean</type>
+       </para>
+       <para>
+        True if this kind tracks a fixed amount of data (a single, statically
+        allocated entry), false if it tracks a variable number of entries
+        keyed by object identifier.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>accessed_across_databases</structfield> <type>boolean</type>
+       </para>
+       <para>
+        True if entries of this kind are accessed across databases (cluster-wide
+        statistics), false if they are scoped to a single database.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>write_to_file</structfield> <type>boolean</type>
+       </para>
+       <para>
+        True if entries of this kind are persisted to the statistics file at
+        shutdown and reloaded on startup, false if they are kept only in
+        shared memory.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>entry_count</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Number of tracked entries for this kind. For variable-numbered kinds,
+        this is the number of objects currently tracked.
+        <literal>NULL</literal> for fixed-sized statistics kinds, or if the
+        kind does not track entry counts.
+       </para>
+      </entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect2>
+
  <sect2 id="monitoring-pg-stat-lock-view">
   <title><structname>pg_stat_lock</structname></title>
 
@@ -3359,7 +3648,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
      <row>
       <entry role="catalog_table_entry">
        <para role="column_definition">
-        <structfield>wait_time</structfield> <type>bigint</type>
+        <structfield>wait_time</structfield> <type>double precision</type>
        </para>
        <para>
         Total time spent waiting for locks of this type, in milliseconds.
@@ -3378,6 +3667,9 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         Number of times a lock of this type could not be acquired via fast path
         because the fast path slot limit was exceeded. Increasing
         <xref linkend="guc-max-locks-per-transaction"/> can reduce this number.
+        See <xref linkend="locking-tables-fast-path"/> for which locks are
+        eligible for fast-path locking; for ineligible lock types this
+        counter is always zero.
        </para>
       </entry>
      </row>
@@ -4594,7 +4886,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <structfield>xid_score</structfield> <type>double precision</type>
       </para>
       <para>
-       Transaction ID age component score.  Scores greater than or equal to
+       Transaction ID age component score.  Scores greater than
        <xref linkend="guc-autovacuum-freeze-score-weight"/> indicate that
        autovacuum would vacuum the table for transaction ID wraparound
        prevention.
@@ -4606,7 +4898,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <structfield>mxid_score</structfield> <type>double precision</type>
       </para>
       <para>
-       Multixact ID age component score.  Scores greater than or equal to
+       Multixact ID age component score.  Scores greater than
        <xref linkend="guc-autovacuum-multixact-freeze-score-weight"/> indicate
        that autovacuum would vacuum the table for multixact ID wraparound
        prevention.
@@ -4618,7 +4910,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <structfield>vacuum_score</structfield> <type>double precision</type>
       </para>
       <para>
-       Vacuum component score.  Scores greater than or equal to
+       Vacuum component score.  Scores greater than
        <xref linkend="guc-autovacuum-vacuum-score-weight"/> indicate that
        autovacuum would vacuum the table (unless autovacuum is disabled).
       </para></entry>
@@ -4629,7 +4921,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <structfield>vacuum_insert_score</structfield> <type>double precision</type>
       </para>
       <para>
-       Vacuum insert component score.  Scores greater than or equal to
+       Vacuum insert component score.  Scores greater than
        <xref linkend="guc-autovacuum-vacuum-insert-score-weight"/> indicate
        that autovacuum would vacuum the table (unless autovacuum is disabled).
       </para></entry>
@@ -4640,7 +4932,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        <structfield>analyze_score</structfield> <type>double precision</type>
       </para>
       <para>
-       Analyze component score.  Scores greater than or equal to
+       Analyze component score.  Scores greater than
        <xref linkend="guc-autovacuum-analyze-score-weight"/> indicate that
        autovacuum would analyze the table (unless autovacuum is disabled).
       </para></entry>
@@ -5527,6 +5819,25 @@ description | Waiting for a newly initialized WAL file to reach durable storage
       </row>
 
       <row>
+       <entry id="pg-stat-get-backend-lock" role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_stat_get_backend_lock</primary>
+        </indexterm>
+        <function>pg_stat_get_backend_lock</function> ( <type>integer</type> )
+        <returnvalue>setof record</returnvalue>
+       </para>
+       <para>
+        Returns lock statistics about the backend with the specified
+        process ID. The output fields are exactly the same as the ones in the
+        <structname>pg_stat_lock</structname> view.
+       </para>
+       <para>
+        The function does not return lock statistics for the checkpointer,
+        the background writer, the startup process and the autovacuum launcher.
+       </para></entry>
+      </row>
+
+      <row>
        <entry id="pg-stat-get-backend-wal" role="func_table_entry"><para role="func_signature">
         <indexterm>
          <primary>pg_stat_get_backend_wal</primary>
@@ -5559,6 +5870,24 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         time cumulative statistics are accessed in a transaction if
         <varname>stats_fetch_consistency</varname> is set to
         <literal>snapshot</literal>
+       </para></entry>
+      </row>
+
+      <row>
+       <entry role="func_table_entry"><para role="func_signature">
+        <indexterm>
+         <primary>pg_stat_reset_single_index_counters</primary>
+        </indexterm>
+        <function>pg_stat_reset_single_index_counters</function> ( <type>oid</type> )
+        <returnvalue>void</returnvalue>
+       </para>
+       <para>
+        Resets statistics for a single index in the current database
+        or shared across all databases in the cluster to zero.
+       </para>
+       <para>
+        This function is restricted to superusers by default, but other users
+        can be granted EXECUTE to run the function.
        </para></entry>
       </row>
 
@@ -5707,7 +6036,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         <returnvalue>void</returnvalue>
        </para>
        <para>
-        Resets statistics for a single table or index in the current database
+        Resets statistics for a single table in the current database
         or shared across all databases in the cluster to zero.
         It also resets statistics for a single sequence or materialized view
         in the current database.
@@ -6121,9 +6450,9 @@ FROM pg_stat_get_backend_idset() AS backendid;
    <command>COPY</command>, <command>CREATE INDEX</command>,
    <command>REPACK</command> (and its obsolete spelling <command>CLUSTER</command>),
    <command>VACUUM</command>,
-   and <xref linkend="protocol-replication-base-backup"/> (i.e., replication
+   <xref linkend="protocol-replication-base-backup"/> (i.e., replication
    command that <xref linkend="app-pgbasebackup"/> issues to take
-   a base backup).
+   a base backup), and online data checksum operations.
    This may be expanded in the future.
   </para>
 
@@ -6393,7 +6722,8 @@ FROM pg_stat_get_backend_idset() AS backendid;
    <command>VACUUM FULL</command> is running,
    the backwards-compatibility <structname>pg_stat_progress_cluster</structname>
    view will
-   contain a row for each backend that is currently running either command.
+   contain a row for each backend that is currently running one of these
+   commands.
    The tables below describe the information that will be reported and
    provide information about how to interpret it.
   </para>
@@ -7067,10 +7397,11 @@ FROM pg_stat_get_backend_idset() AS backendid;
   </indexterm>
 
   <para>
-   Whenever <command>REPACK</command> is running,
+   Whenever <command>REPACK</command>, <command>CLUSTER</command>, or
+   <command>VACUUM FULL</command> is running,
    the <structname>pg_stat_progress_repack</structname> view will contain a
-   row for each backend that is currently running the command.  The tables
-   below describe the information that will be reported and provide
+   row for each backend that is currently running one of these commands.
+   The tables below describe the information that will be reported and provide
    information about how to interpret it.
   </para>
 
@@ -7121,7 +7452,7 @@ FROM pg_stat_get_backend_idset() AS backendid;
        <structfield>relid</structfield> <type>oid</type>
       </para>
       <para>
-       OID of the table being repacked.
+       OID of the table being processed.
       </para></entry>
      </row>
 
@@ -7130,8 +7461,8 @@ FROM pg_stat_get_backend_idset() AS backendid;
        <structfield>command</structfield> <type>text</type>
       </para>
       <para>
-       The command that is running. Either <command>REPACK</command> or
-       <command>VACUUM FULL</command>, or <command>CLUSTER</command>.
+       The command that is running. One of <command>CLUSTER</command>,
+       <command>REPACK</command>, or <command>VACUUM FULL</command>.
       </para></entry>
      </row>
 
@@ -7324,10 +7655,12 @@ FROM pg_stat_get_backend_idset() AS backendid;
    currently vacuuming.  The tables below describe the information
    that will be reported and provide information about how to interpret it.
    Progress for <command>VACUUM FULL</command> commands is reported via
-   <structname>pg_stat_progress_cluster</structname>
+   <structname>pg_stat_progress_repack</structname>, and is also visible via
+   the backwards-compatibility <structname>pg_stat_progress_cluster</structname>
    because both <command>VACUUM FULL</command> and <command>CLUSTER</command>
    rewrite the table, while regular <command>VACUUM</command> only modifies it
-   in place. See <xref linkend="cluster-progress-reporting"/>.
+   in place. See <xref linkend="repack-progress-reporting"/> and
+   <xref linkend="cluster-progress-reporting"/>.
   </para>
 
   <table id="pg-stat-progress-vacuum-view" xreflabel="pg_stat_progress_vacuum">
@@ -7855,13 +8188,14 @@ FROM pg_stat_get_backend_idset() AS backendid;
   </indexterm>
 
   <para>
-   When data checksums are being enabled on a running cluster, the
+   When data checksums are being enabled or disabled on a running cluster, the
    <structname>pg_stat_progress_data_checksums</structname> view will contain
-   a row for the launcher process, and one row for each worker process which
-   is currently calculating and writing checksums for the data pages in a database.
-   The launcher provides overview of the overall progress (how many databases
-   have been processed, how many remain), while the workers track progress for
-   currently processed databases.
+   a row for the launcher process.  When enabling data checksums, the view
+   will also contain one row for each worker process which is currently
+   calculating and writing checksums for the data pages in a database.  The
+   launcher provides an overview of the overall progress, such as how many
+   databases have been processed and how many remain, while the workers track
+   progress for currently processed databases.
   </para>
 
   <table id="pg-stat-progress-data-checksums-view" xreflabel="pg_stat_progress_data_checksums">
@@ -7930,12 +8264,12 @@ FROM pg_stat_get_backend_idset() AS backendid;
      <row>
       <entry role="catalog_table_entry">
        <para role="column_definition">
-        <structfield>databases_total</structfield> <type>integer</type>
+        <structfield>databases_total</structfield> <type>bigint</type>
        </para>
        <para>
         The total number of databases which will be processed. Only the
-        launcher process has this value set, the worker processes have this
-        set to <literal>NULL</literal>.
+        launcher process has this value set when enabling data checksums;
+        otherwise this is set to <literal>NULL</literal>.
        </para>
       </entry>
      </row>
@@ -7943,12 +8277,12 @@ FROM pg_stat_get_backend_idset() AS backendid;
      <row>
       <entry role="catalog_table_entry">
        <para role="column_definition">
-        <structfield>databases_done</structfield> <type>integer</type>
+        <structfield>databases_done</structfield> <type>bigint</type>
        </para>
        <para>
         The number of databases which have been processed. Only the launcher
-        process has this value set, the worker processes have this set to
-        <literal>NULL</literal>.
+        process has this value set when enabling data checksums; otherwise
+        this is set to <literal>NULL</literal>.
        </para>
       </entry>
      </row>
@@ -7956,7 +8290,7 @@ FROM pg_stat_get_backend_idset() AS backendid;
      <row>
       <entry role="catalog_table_entry">
        <para role="column_definition">
-        <structfield>relations_total</structfield> <type>integer</type>
+        <structfield>relations_total</structfield> <type>bigint</type>
        </para>
        <para>
         The total number of relations which will be processed, or
@@ -7971,7 +8305,7 @@ FROM pg_stat_get_backend_idset() AS backendid;
      <row>
       <entry role="catalog_table_entry">
        <para role="column_definition">
-        <structfield>relations_done</structfield> <type>integer</type>
+        <structfield>relations_done</structfield> <type>bigint</type>
        </para>
        <para>
         The number of relations which have been processed. The launcher
@@ -7983,7 +8317,7 @@ FROM pg_stat_get_backend_idset() AS backendid;
      <row>
       <entry role="catalog_table_entry">
        <para role="column_definition">
-        <structfield>blocks_total</structfield> <type>integer</type>
+        <structfield>blocks_total</structfield> <type>bigint</type>
        </para>
        <para>
         The number of blocks in the current relation which will be processed,
@@ -7997,7 +8331,7 @@ FROM pg_stat_get_backend_idset() AS backendid;
      <row>
       <entry role="catalog_table_entry">
        <para role="column_definition">
-        <structfield>blocks_done</structfield> <type>integer</type>
+        <structfield>blocks_done</structfield> <type>bigint</type>
        </para>
        <para>
         The number of blocks in the current relation which have been processed.
@@ -8431,7 +8765,7 @@ FROM pg_stat_get_backend_idset() AS backendid;
     </row>
     <row>
      <entry><literal>smgr-md-read-done</literal></entry>
-     <entry><literal>(ForkNumber, BlockNumber, Oid, Oid, Oid, int, int, int)</literal></entry>
+     <entry><literal>(ForkNumber, BlockNumber, Oid, Oid, Oid, int, ssize_t, size_t)</literal></entry>
      <entry>Probe that fires when a block read is complete.
       arg0 and arg1 contain the fork and block numbers of the page.
       arg2, arg3, and arg4 contain the tablespace, database, and relation OIDs
@@ -8453,7 +8787,7 @@ FROM pg_stat_get_backend_idset() AS backendid;
     </row>
     <row>
      <entry><literal>smgr-md-write-done</literal></entry>
-     <entry><literal>(ForkNumber, BlockNumber, Oid, Oid, Oid, int, int, int)</literal></entry>
+     <entry><literal>(ForkNumber, BlockNumber, Oid, Oid, Oid, int, ssize_t, size_t)</literal></entry>
      <entry>Probe that fires when a block write is complete.
       arg0 and arg1 contain the fork and block numbers of the page.
       arg2, arg3, and arg4 contain the tablespace, database, and relation OIDs

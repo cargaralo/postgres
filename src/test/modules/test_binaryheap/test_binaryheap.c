@@ -49,7 +49,7 @@ get_max_from_heap(binaryheap *heap)
 static int *
 get_permutation(int size)
 {
-	int		   *permutation = (int *) palloc(size * sizeof(int));
+	int		   *permutation = palloc_array(int, size);
 
 	permutation[0] = 0;
 
@@ -259,7 +259,7 @@ test_binaryheap(PG_FUNCTION_ARGS)
 {
 	static const int test_sizes[] = {1, 2, 3, 10, 100, 1000};
 
-	for (int i = 0; i < sizeof(test_sizes) / sizeof(int); i++)
+	for (size_t i = 0; i < sizeof(test_sizes) / sizeof(int); i++)
 	{
 		int			size = test_sizes[i];
 

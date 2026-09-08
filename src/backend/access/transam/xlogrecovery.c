@@ -61,6 +61,7 @@
 #include "storage/subsystems.h"
 #include "utils/datetime.h"
 #include "utils/fmgrprotos.h"
+#include "utils/guc.h"
 #include "utils/guc_hooks.h"
 #include "utils/pgstat_internal.h"
 #include "utils/pg_lsn.h"
@@ -92,7 +93,7 @@ int			recoveryTargetAction = RECOVERY_TARGET_ACTION_PAUSE;
 TransactionId recoveryTargetXid;
 char	   *recovery_target_time_string;
 TimestampTz recoveryTargetTime;
-const char *recoveryTargetName;
+char	   *recoveryTargetName;
 XLogRecPtr	recoveryTargetLSN;
 int			recovery_min_apply_delay = 0;
 
@@ -392,6 +393,7 @@ static bool HotStandbyActiveInReplay(void);
 
 static void SetCurrentChunkStartTime(TimestampTz xtime);
 static void SetLatestXTime(TimestampTz xtime);
+static RecoveryTargetType DetermineRecoveryTargetType(void);
 
 /*
  * Register shared memory for WAL recovery
@@ -447,7 +449,7 @@ EnableStandbyMode(void)
  * the checkpoint record.  On entry, the caller has already read the control
  * file into memory, and passes it as argument.  This function updates it to
  * reflect the recovery state, and the caller is expected to write it back to
- * disk does after initializing other subsystems, but before calling
+ * disk after initializing other subsystems, but before calling
  * PerformWalRecovery().
  *
  * This initializes some global variables like ArchiveRecoveryRequested, and
@@ -468,6 +470,15 @@ InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,
 	bool		backupFromStandby = false;
 
 	dbstate_at_startup = ControlFile->state;
+
+	/*
+	 * A startup process always starts with an inconsistent database. Set the
+	 * flag accordingly, even if it was inherited from a postmaster that had
+	 * already marked the database as consistent. This keeps the invariant
+	 * local to the startup process without requiring every fork path to clear
+	 * the flag.
+	 */
+	reachedConsistency = false;
 
 	/*
 	 * Initialize on the assumption we want to recover to the latest timeline
@@ -1067,6 +1078,9 @@ readRecoverySignalFile(void)
 static void
 validateRecoveryParameters(void)
 {
+	/* Reject conflicting targets even when recovery was not requested */
+	recoveryTarget = DetermineRecoveryTargetType();
+
 	if (!ArchiveRecoveryRequested)
 		return;
 
@@ -3282,7 +3296,7 @@ XLogPageRead(XLogReaderState *xlogreader, XLogRecPtr targetPagePtr, int reqLen,
 	int			emode = private->emode;
 	uint32		targetPageOff;
 	XLogSegNo	targetSegNo PG_USED_FOR_ASSERTS_ONLY;
-	int			r;
+	ssize_t		r;
 	instr_time	io_start;
 
 	Assert(AmStartupProcess() || !IsUnderPostmaster);
@@ -3390,8 +3404,10 @@ retry:
 
 		pgstat_report_wait_end();
 
-		pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_READ,
-								io_start, 1, r);
+		/* Count I/O stats only for successful short reads */
+		if (r > 0)
+			pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_READ,
+									io_start, 1, r);
 
 		XLogFileName(fname, curFileTLI, readSegNo, wal_segment_size);
 		if (r < 0)
@@ -3406,7 +3422,7 @@ retry:
 		else
 			ereport(emode_for_corrupt_record(emode, targetPagePtr + reqLen),
 					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("could not read from WAL segment %s, LSN %X/%08X, offset %u: read %d of %zu",
+					 errmsg("could not read from WAL segment %s, LSN %X/%08X, offset %u: read %zd of %zu",
 							fname, LSN_FORMAT_ARGS(targetPagePtr),
 							readOff, r, (Size) XLOG_BLCKSZ)));
 		goto next_record_is_invalid;
@@ -4480,6 +4496,32 @@ CheckPromoteSignal(void)
 }
 
 /*
+ * Has hot standby initialization started pg_subtrans?
+ */
+bool
+RecoverySubtransInitialized(void)
+{
+	bool		result;
+
+	SpinLockAcquire(&XLogRecoveryCtl->info_lck);
+	result = XLogRecoveryCtl->SharedRecoverySubtransInitialized;
+	SpinLockRelease(&XLogRecoveryCtl->info_lck);
+
+	return result;
+}
+
+/*
+ * Remember that hot standby initialization has started pg_subtrans.
+ */
+void
+SetRecoverySubtransInitialized(void)
+{
+	SpinLockAcquire(&XLogRecoveryCtl->info_lck);
+	XLogRecoveryCtl->SharedRecoverySubtransInitialized = true;
+	SpinLockRelease(&XLogRecoveryCtl->info_lck);
+}
+
+/*
  * Wake up startup process to replay newly arrived WAL, or to notice that
  * failover has been requested.
  */
@@ -4767,30 +4809,50 @@ check_primary_slot_name(char **newval, void **extra, GucSource source)
 }
 
 /*
- * Recovery target settings: Only one of the several recovery_target* settings
- * may be set.  Setting a second one results in an error.  The global variable
- * recoveryTarget tracks which kind of recovery target was chosen.  Other
- * variables store the actual target value (for example a string or a xid).
- * The assign functions of the parameters check whether a competing parameter
- * was already set.  But we want to allow setting the same parameter multiple
- * times.  We also want to allow unsetting a parameter and setting a different
- * one, so we unset recoveryTarget when the parameter is set to an empty
- * string.
- *
- * XXX this code is broken by design.  Throwing an error from a GUC assign
- * hook breaks fundamental assumptions of guc.c.  So long as all the variables
- * for which this can happen are PGC_POSTMASTER, the consequences are limited,
- * since we'd just abort postmaster startup anyway.  Nonetheless it's likely
- * that we have odd behaviors such as unexpected GUC ordering dependencies.
+ * Return the recovery target derived from the recovery_target* settings,
+ * raising an error if more than one of them is set.
  */
-
-pg_noreturn static void
-error_multiple_recovery_targets(void)
+static RecoveryTargetType
+DetermineRecoveryTargetType(void)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-			 errmsg("multiple recovery targets specified"),
-			 errdetail("At most one of \"recovery_target\", \"recovery_target_lsn\", \"recovery_target_name\", \"recovery_target_time\", \"recovery_target_xid\" may be set.")));
+	int			ntargets = 0;
+	RecoveryTargetType target = RECOVERY_TARGET_UNSET;
+	const char *val;
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+
+#define ADD_TARGET_IF_SET(gucname, kind) \
+	do { \
+		val = GetConfigOption(gucname, false, false); \
+		if (val[0] != '\0') \
+		{ \
+			ntargets++; \
+			target = (kind); \
+			if (buf.len == 0) \
+				appendStringInfo(&buf, _("\"%s\""), gucname); \
+			else \
+				appendStringInfo(&buf, _(", \"%s\""), gucname); \
+		} \
+	} while (0)
+
+	ADD_TARGET_IF_SET("recovery_target", RECOVERY_TARGET_IMMEDIATE);
+	ADD_TARGET_IF_SET("recovery_target_lsn", RECOVERY_TARGET_LSN);
+	ADD_TARGET_IF_SET("recovery_target_name", RECOVERY_TARGET_NAME);
+	ADD_TARGET_IF_SET("recovery_target_time", RECOVERY_TARGET_TIME);
+	ADD_TARGET_IF_SET("recovery_target_xid", RECOVERY_TARGET_XID);
+#undef ADD_TARGET_IF_SET
+
+	if (ntargets > 1)
+		ereport(FATAL,
+				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("cannot specify more than one recovery target"),
+				errdetail("Parameters set are: %s.",
+						  buf.data));
+
+	pfree(buf.data);
+
+	return target;
 }
 
 /*
@@ -4805,22 +4867,6 @@ check_recovery_target(char **newval, void **extra, GucSource source)
 		return false;
 	}
 	return true;
-}
-
-/*
- * GUC assign_hook for recovery_target
- */
-void
-assign_recovery_target(const char *newval, void *extra)
-{
-	if (recoveryTarget != RECOVERY_TARGET_UNSET &&
-		recoveryTarget != RECOVERY_TARGET_IMMEDIATE)
-		error_multiple_recovery_targets();
-
-	if (newval && strcmp(newval, "") != 0)
-		recoveryTarget = RECOVERY_TARGET_IMMEDIATE;
-	else
-		recoveryTarget = RECOVERY_TARGET_UNSET;
 }
 
 /*
@@ -4854,17 +4900,8 @@ check_recovery_target_lsn(char **newval, void **extra, GucSource source)
 void
 assign_recovery_target_lsn(const char *newval, void *extra)
 {
-	if (recoveryTarget != RECOVERY_TARGET_UNSET &&
-		recoveryTarget != RECOVERY_TARGET_LSN)
-		error_multiple_recovery_targets();
-
 	if (newval && strcmp(newval, "") != 0)
-	{
-		recoveryTarget = RECOVERY_TARGET_LSN;
 		recoveryTargetLSN = *((XLogRecPtr *) extra);
-	}
-	else
-		recoveryTarget = RECOVERY_TARGET_UNSET;
 }
 
 /*
@@ -4881,25 +4918,6 @@ check_recovery_target_name(char **newval, void **extra, GucSource source)
 		return false;
 	}
 	return true;
-}
-
-/*
- * GUC assign_hook for recovery_target_name
- */
-void
-assign_recovery_target_name(const char *newval, void *extra)
-{
-	if (recoveryTarget != RECOVERY_TARGET_UNSET &&
-		recoveryTarget != RECOVERY_TARGET_NAME)
-		error_multiple_recovery_targets();
-
-	if (newval && strcmp(newval, "") != 0)
-	{
-		recoveryTarget = RECOVERY_TARGET_NAME;
-		recoveryTargetName = newval;
-	}
-	else
-		recoveryTarget = RECOVERY_TARGET_UNSET;
 }
 
 /*
@@ -4961,22 +4979,6 @@ check_recovery_target_time(char **newval, void **extra, GucSource source)
 		}
 	}
 	return true;
-}
-
-/*
- * GUC assign_hook for recovery_target_time
- */
-void
-assign_recovery_target_time(const char *newval, void *extra)
-{
-	if (recoveryTarget != RECOVERY_TARGET_UNSET &&
-		recoveryTarget != RECOVERY_TARGET_TIME)
-		error_multiple_recovery_targets();
-
-	if (newval && strcmp(newval, "") != 0)
-		recoveryTarget = RECOVERY_TARGET_TIME;
-	else
-		recoveryTarget = RECOVERY_TARGET_UNSET;
 }
 
 /*
@@ -5097,15 +5099,6 @@ check_recovery_target_xid(char **newval, void **extra, GucSource source)
 void
 assign_recovery_target_xid(const char *newval, void *extra)
 {
-	if (recoveryTarget != RECOVERY_TARGET_UNSET &&
-		recoveryTarget != RECOVERY_TARGET_XID)
-		error_multiple_recovery_targets();
-
 	if (newval && strcmp(newval, "") != 0)
-	{
-		recoveryTarget = RECOVERY_TARGET_XID;
 		recoveryTargetXid = *((TransactionId *) extra);
-	}
-	else
-		recoveryTarget = RECOVERY_TARGET_UNSET;
 }

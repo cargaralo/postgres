@@ -108,6 +108,40 @@ PG_STAT_GET_RELENTRY_INT64(tuples_updated)
 /* pg_stat_get_vacuum_count */
 PG_STAT_GET_RELENTRY_INT64(vacuum_count)
 
+/*
+ * Accessor macro for index stats entries (PgStat_StatIdxEntry).
+ */
+#define PG_STAT_GET_IDXENTRY_INT64(stat)						\
+Datum															\
+CppConcat(pg_stat_get_idx_,stat)(PG_FUNCTION_ARGS)				\
+{																\
+	Oid			relid = PG_GETARG_OID(0);						\
+	int64		result;											\
+	PgStat_StatIdxEntry *idxentry;								\
+																\
+	if ((idxentry = pgstat_fetch_stat_idxentry(relid)) == NULL)	\
+		result = 0;												\
+	else														\
+		result = (int64) (idxentry->stat);						\
+																\
+	PG_RETURN_INT64(result);									\
+}
+
+/* pg_stat_get_idx_numscans */
+PG_STAT_GET_IDXENTRY_INT64(numscans)
+
+/* pg_stat_get_idx_tuples_returned */
+PG_STAT_GET_IDXENTRY_INT64(tuples_returned)
+
+/* pg_stat_get_idx_tuples_fetched */
+PG_STAT_GET_IDXENTRY_INT64(tuples_fetched)
+
+/* pg_stat_get_idx_blocks_fetched */
+PG_STAT_GET_IDXENTRY_INT64(blocks_fetched)
+
+/* pg_stat_get_idx_blocks_hit */
+PG_STAT_GET_IDXENTRY_INT64(blocks_hit)
+
 #define PG_STAT_GET_RELENTRY_FLOAT8(stat)						\
 Datum															\
 CppConcat(pg_stat_get_,stat)(PG_FUNCTION_ARGS)					\
@@ -172,6 +206,34 @@ PG_STAT_GET_RELENTRY_TIMESTAMPTZ(lastscan)
 
 /* pg_stat_get_stat_reset_time */
 PG_STAT_GET_RELENTRY_TIMESTAMPTZ(stat_reset_time)
+
+/*
+ * Accessor macro for index timestamp fields.
+ */
+#define PG_STAT_GET_IDXENTRY_TIMESTAMPTZ(stat)					\
+Datum															\
+CppConcat(pg_stat_get_idx_,stat)(PG_FUNCTION_ARGS)				\
+{																\
+	Oid			relid = PG_GETARG_OID(0);						\
+	TimestampTz result;											\
+	PgStat_StatIdxEntry *idxentry;								\
+																\
+	if ((idxentry = pgstat_fetch_stat_idxentry(relid)) == NULL)	\
+		result = 0;												\
+	else														\
+		result = idxentry->stat;								\
+																\
+	if (result == 0)											\
+		PG_RETURN_NULL();										\
+	else														\
+		PG_RETURN_TIMESTAMPTZ(result);							\
+}
+
+/* pg_stat_get_idx_lastscan */
+PG_STAT_GET_IDXENTRY_TIMESTAMPTZ(lastscan)
+
+/* pg_stat_get_idx_stat_reset_time */
+PG_STAT_GET_IDXENTRY_TIMESTAMPTZ(stat_reset_time)
 
 Datum
 pg_stat_get_function_calls(PG_FUNCTION_ARGS)
@@ -1455,9 +1517,9 @@ pgstat_get_io_time_index(IOOp io_op)
 }
 
 static inline double
-pg_stat_us_to_ms(PgStat_Counter val_ms)
+pg_stat_us_to_ms(PgStat_Counter val_us)
 {
-	return val_ms * (double) 0.001;
+	return (double) val_us / 1000.0;
 }
 
 /*
@@ -1737,10 +1799,43 @@ pg_stat_get_wal(PG_FUNCTION_ARGS)
 									wal_stats->stat_reset_timestamp));
 }
 
+/*
+ * pg_stat_lock_build_tuples
+ *
+ * Helper routine for pg_stat_get_lock() and pg_stat_get_backend_lock(),
+ * filling a result tuplestore with one tuple for each lock type.
+ */
+static void
+pg_stat_lock_build_tuples(ReturnSetInfo *rsinfo,
+						  PgStat_LockEntry *lock_stats,
+						  TimestampTz stat_reset_timestamp)
+{
+#define PG_STAT_LOCK_COLS	5
+	for (int lcktype = 0; lcktype <= LOCKTAG_LAST_TYPE; lcktype++)
+	{
+		Datum		values[PG_STAT_LOCK_COLS] = {0};
+		bool		nulls[PG_STAT_LOCK_COLS] = {0};
+		PgStat_LockEntry *lck_stats = &lock_stats[lcktype];
+		int			i = 0;
+
+		values[i++] = CStringGetTextDatum(LockTagTypeNames[lcktype]);
+		values[i++] = Int64GetDatum(lck_stats->waits);
+		values[i++] = Float8GetDatum(pg_stat_us_to_ms(lck_stats->wait_time));
+		values[i++] = Int64GetDatum(lck_stats->fastpath_exceeded);
+		if (stat_reset_timestamp != 0)
+			values[i] = TimestampTzGetDatum(stat_reset_timestamp);
+		else
+			nulls[i] = true;
+
+		Assert(i + 1 == PG_STAT_LOCK_COLS);
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+}
+
 Datum
 pg_stat_get_lock(PG_FUNCTION_ARGS)
 {
-#define PG_STAT_LOCK_COLS	5
 	ReturnSetInfo *rsinfo;
 	PgStat_Lock *lock_stats;
 
@@ -1749,26 +1844,33 @@ pg_stat_get_lock(PG_FUNCTION_ARGS)
 
 	lock_stats = pgstat_fetch_stat_lock();
 
-	for (int lcktype = 0; lcktype <= LOCKTAG_LAST_TYPE; lcktype++)
-	{
-		const char *locktypename;
-		Datum		values[PG_STAT_LOCK_COLS] = {0};
-		bool		nulls[PG_STAT_LOCK_COLS] = {0};
-		PgStat_LockEntry *lck_stats = &lock_stats->stats[lcktype];
-		int			i = 0;
+	pg_stat_lock_build_tuples(rsinfo, lock_stats->stats,
+							  lock_stats->stat_reset_timestamp);
 
-		locktypename = LockTagTypeNames[lcktype];
+	return (Datum) 0;
+}
 
-		values[i++] = CStringGetTextDatum(locktypename);
-		values[i++] = Int64GetDatum(lck_stats->waits);
-		values[i++] = Int64GetDatum(lck_stats->wait_time);
-		values[i++] = Int64GetDatum(lck_stats->fastpath_exceeded);
-		values[i] = TimestampTzGetDatum(lock_stats->stat_reset_timestamp);
+/*
+ * Returns lock statistics for a backend with given PID.
+ */
+Datum
+pg_stat_get_backend_lock(PG_FUNCTION_ARGS)
+{
+	int			pid;
+	ReturnSetInfo *rsinfo;
+	PgStat_Backend *backend_stats;
 
-		Assert(i + 1 == PG_STAT_LOCK_COLS);
+	InitMaterializedSRF(fcinfo, 0);
+	rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
-		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
-	}
+	pid = PG_GETARG_INT32(0);
+	backend_stats = pgstat_fetch_stat_backend_by_pid(pid, NULL);
+
+	if (!backend_stats)
+		return (Datum) 0;
+
+	pg_stat_lock_build_tuples(rsinfo, backend_stats->lock_stats.stats,
+							  backend_stats->stat_reset_timestamp);
 
 	return (Datum) 0;
 }
@@ -1826,12 +1928,13 @@ CppConcat(pg_stat_get_xact_,stat)(PG_FUNCTION_ARGS)		\
 {														\
 	Oid         relid = PG_GETARG_OID(0);				\
 	int64       result;									\
-	PgStat_TableStatus *tabentry;						\
+	PgStat_RelationStatus *tabentry;						\
 														\
-	if ((tabentry = find_tabstat_entry(relid)) == NULL)	\
+	if ((tabentry = find_relstat_entry_kind(PGSTAT_KIND_RELATION, \
+											relid)) == NULL)	\
 		result = 0;										\
 	else												\
-		result = (int64) (tabentry->counts.stat);		\
+		result = (int64) (tabentry->tab.counts.stat);		\
 														\
 	PG_RETURN_INT64(result);							\
 }
@@ -1865,6 +1968,41 @@ PG_STAT_GET_XACT_RELENTRY_INT64(tuples_updated)
 
 /* pg_stat_get_xact_tuples_deleted */
 PG_STAT_GET_XACT_RELENTRY_INT64(tuples_deleted)
+
+/*
+ * Accessor macro for in-transaction index stats.
+ */
+#define PG_STAT_GET_XACT_IDXENTRY_INT64(stat)			\
+Datum													\
+CppConcat(pg_stat_get_xact_idx_,stat)(PG_FUNCTION_ARGS) \
+{														\
+	Oid         relid = PG_GETARG_OID(0);				\
+	int64       result;									\
+	PgStat_RelationStatus *tabentry;						\
+														\
+	tabentry = find_relstat_entry_kind(PGSTAT_KIND_INDEX, relid); \
+	if (!tabentry)										\
+		result = 0;										\
+	else												\
+		result = (int64) (tabentry->idx.stat);		\
+														\
+	PG_RETURN_INT64(result);							\
+}
+
+/* pg_stat_get_xact_idx_numscans */
+PG_STAT_GET_XACT_IDXENTRY_INT64(numscans)
+
+/* pg_stat_get_xact_idx_tuples_returned */
+PG_STAT_GET_XACT_IDXENTRY_INT64(tuples_returned)
+
+/* pg_stat_get_xact_idx_tuples_fetched */
+PG_STAT_GET_XACT_IDXENTRY_INT64(tuples_fetched)
+
+/* pg_stat_get_xact_idx_blocks_fetched */
+PG_STAT_GET_XACT_IDXENTRY_INT64(blocks_fetched)
+
+/* pg_stat_get_xact_idx_blocks_hit */
+PG_STAT_GET_XACT_IDXENTRY_INT64(blocks_hit)
 
 Datum
 pg_stat_get_xact_function_calls(PG_FUNCTION_ARGS)
@@ -2003,6 +2141,17 @@ pg_stat_reset_single_table_counters(PG_FUNCTION_ARGS)
 	Oid			dboid = (IsSharedRelation(taboid) ? InvalidOid : MyDatabaseId);
 
 	pgstat_reset(PGSTAT_KIND_RELATION, dboid, taboid);
+
+	PG_RETURN_VOID();
+}
+
+Datum
+pg_stat_reset_single_index_counters(PG_FUNCTION_ARGS)
+{
+	Oid			idxoid = PG_GETARG_OID(0);
+	Oid			dboid = (IsSharedRelation(idxoid) ? InvalidOid : MyDatabaseId);
+
+	pgstat_reset(PGSTAT_KIND_INDEX, dboid, idxoid);
 
 	PG_RETURN_VOID();
 }

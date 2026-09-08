@@ -271,8 +271,12 @@ make_subplan(PlannerInfo *root, Query *orig_subquery,
 		{
 			char	   *plan_name;
 
-			/* Generate Paths for the ANY subquery; we'll need all rows */
-			plan_name = choose_plan_name(root->glob, sublinkstr, true);
+			/*
+			 * Generate Paths for the ANY subquery; we'll need all rows. Use a
+			 * distinct prefix for this user-visible name, since this is an
+			 * ANY implementation of the original EXISTS subplan.
+			 */
+			plan_name = choose_plan_name(root->glob, "exists_to_any", true);
 			subroot = subquery_planner(root->glob, subquery, plan_name,
 									   root, subroot, false, 0.0, NULL);
 
@@ -841,7 +845,9 @@ hash_ok_operator(OpExpr *expr)
 	if (list_length(expr->args) != 2)
 		return false;
 	if (opid == ARRAY_EQ_OP ||
-		opid == RECORD_EQ_OP)
+		opid == RECORD_EQ_OP ||
+		opid == RANGE_EQ_OP ||
+		opid == MULTIRANGE_EQ_OP)
 	{
 		/* these are strict, but must check input type to ensure hashable */
 		Node	   *leftarg = linitial(expr->args);

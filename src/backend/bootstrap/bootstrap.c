@@ -51,7 +51,7 @@
 static void CheckerModeMain(void);
 static void bootstrap_signals(void);
 static Form_pg_attribute AllocateAttribute(void);
-static void InsertOneProargdefaultsValue(char *value);
+static void InsertOneProargdefaultsValue(const char *value);
 static void populate_typ_list(void);
 static Oid	gettype(char *type);
 static void cleanup(void);
@@ -698,7 +698,7 @@ InsertOneTuple(void)
  * ----------------
  */
 void
-InsertOneValue(char *value, int i)
+InsertOneValue(const char *value, int i)
 {
 	Form_pg_attribute attr;
 	Oid			typoid;
@@ -765,7 +765,7 @@ InsertOneValue(char *value, int i)
  * ----------------
  */
 static void
-InsertOneProargdefaultsValue(char *value)
+InsertOneProargdefaultsValue(const char *value)
 {
 	int			pronargs;
 	oidvector  *proargtypes;
@@ -1093,7 +1093,7 @@ boot_get_type_io_data(Oid typid,
 Oid
 boot_get_role_oid(const char *rolname)
 {
-	for (int i = 0; i < lengthof(RolInfo); i++)
+	for (size_t i = 0; i < lengthof(RolInfo); i++)
 	{
 		if (strcmp(RolInfo[i].rolname, rolname) == 0)
 			return RolInfo[i].oid;

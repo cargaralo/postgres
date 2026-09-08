@@ -1419,7 +1419,7 @@ xml_pnstrdup(const xmlChar *str, size_t len)
 {
 	xmlChar    *result;
 
-	result = (xmlChar *) palloc((len + 1) * sizeof(xmlChar));
+	result = palloc_array(xmlChar, len + 1);
 	memcpy(result, str, len * sizeof(xmlChar));
 	result[len] = 0;
 	return result;
@@ -1431,7 +1431,7 @@ pg_xmlCharStrndup(const char *str, size_t len)
 {
 	xmlChar    *result;
 
-	result = (xmlChar *) palloc((len + 1) * sizeof(xmlChar));
+	result = palloc_array(xmlChar, len + 1);
 	memcpy(result, str, len);
 	result[len] = '\0';
 
@@ -4199,7 +4199,9 @@ xml_xmlnodetoxmltype(xmlNodePtr cur, PgXmlErrorContext *xmlerrcxt)
 {
 	xmltype    *result = NULL;
 
-	if (cur->type != XML_ATTRIBUTE_NODE && cur->type != XML_TEXT_NODE)
+	if (cur->type != XML_ATTRIBUTE_NODE &&
+		cur->type != XML_TEXT_NODE &&
+		cur->type != XML_NAMESPACE_DECL)
 	{
 		void		(*volatile nodefree) (xmlNodePtr) = NULL;
 		volatile xmlBufferPtr buf = NULL;

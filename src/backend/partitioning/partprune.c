@@ -654,12 +654,12 @@ make_partitionedrel_pruneinfo(PlannerInfo *root, RelOptInfo *parentrel,
 		 * Also construct a Bitmapset of all partitions that are present (that
 		 * is, not pruned already).
 		 */
-		subplan_map = (int *) palloc(nparts * sizeof(int));
+		subplan_map = palloc_array(int, nparts);
 		memset(subplan_map, -1, nparts * sizeof(int));
-		subpart_map = (int *) palloc(nparts * sizeof(int));
+		subpart_map = palloc_array(int, nparts);
 		memset(subpart_map, -1, nparts * sizeof(int));
-		relid_map = (Oid *) palloc0(nparts * sizeof(Oid));
-		leafpart_rti_map = (int *) palloc0(nparts * sizeof(int));
+		relid_map = palloc0_array(Oid, nparts);
+		leafpart_rti_map = palloc0_array(int, nparts);
 		present_parts = NULL;
 
 		i = -1;
@@ -867,8 +867,7 @@ get_matching_partitions(PartitionPruneContext *context, List *pruning_steps)
 	 * result of applying all pruning steps is the value contained in the slot
 	 * of the last pruning step.
 	 */
-	results = (PruneStepResult **)
-		palloc0(num_steps * sizeof(PruneStepResult *));
+	results = palloc0_array(PruneStepResult *, num_steps);
 	foreach(lc, pruning_steps)
 	{
 		PartitionPruneStep *step = lfirst(lc);
@@ -3031,15 +3030,9 @@ get_matching_range_bounds(PartitionPruneContext *context,
 	 */
 	if (nvalues == 0)
 	{
-		/* ignore key space not covered by any partitions */
-		if (partindices[minoff] < 0)
-			minoff++;
-		if (partindices[maxoff] < 0)
-			maxoff--;
-
 		result->scan_default = partition_bound_has_default(boundinfo);
-		Assert(partindices[minoff] >= 0 &&
-			   partindices[maxoff] >= 0);
+		Assert(partindices[minoff] >= -1 &&
+			   partindices[maxoff] >= -1);
 		result->bound_offsets = bms_add_range(NULL, minoff, maxoff);
 
 		return result;
@@ -3213,12 +3206,15 @@ get_matching_range_bounds(PartitionPruneContext *context,
 					 * of smallest such bound) or find the smallest one that's
 					 * greater than the lookup values and set minoff to that.
 					 */
-					while (off >= 1 && off < boundinfo->ndatums - 1)
+					while (true)
 					{
 						int32		cmpval;
 						int			nextoff;
 
 						nextoff = inclusive ? off - 1 : off + 1;
+
+						if (nextoff < 0 || nextoff >= boundinfo->ndatums)
+							break;
 						cmpval =
 							partition_rbound_datum_cmp(partsupfunc,
 													   partcollation,
@@ -3272,16 +3268,21 @@ get_matching_range_bounds(PartitionPruneContext *context,
 			if (off >= 0)
 			{
 				/*
-				 * See the comment above.
+				 * As above, check adjacent bounds to see if the bound is
+				 * equal to the lookup value.
 				 */
 				if (is_equal && nvalues < partnatts)
 				{
-					while (off >= 1 && off < boundinfo->ndatums - 1)
+					while (true)
 					{
 						int32		cmpval;
 						int			nextoff;
 
 						nextoff = inclusive ? off + 1 : off - 1;
+
+						if (nextoff < 0 || nextoff >= boundinfo->ndatums)
+							break;
+
 						cmpval = partition_rbound_datum_cmp(partsupfunc,
 															partcollation,
 															boundinfo->datums[nextoff],

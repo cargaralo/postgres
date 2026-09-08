@@ -18,10 +18,12 @@
 #include "access/nbtree.h"
 #include "access/relscan.h"
 #include "access/xact.h"
+#include "catalog/catalog.h"
 #include "executor/instrument_node.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "storage/predicate.h"
+#include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 
@@ -1516,6 +1518,11 @@ _bt_first(IndexScanDesc scan, ScanDirection dir)
 	{
 		Assert(!so->needPrimScan);
 
+#ifdef USE_INJECTION_POINTS
+		if (!IsCatalogRelation(rel))
+			INJECTION_POINT("nbtree-first-empty", NULL);
+#endif
+
 		/*
 		 * We only get here if the index is completely empty. Lock relation
 		 * because nothing finer to lock exists.  Without a buffer lock, it's
@@ -1977,6 +1984,11 @@ _bt_lock_and_validate_left(Relation rel, BlockNumber *blkno,
 {
 	BlockNumber origblkno = *blkno; /* detects circular links */
 
+#ifdef USE_INJECTION_POINTS
+	if (!IsCatalogRelation(rel))
+		INJECTION_POINT("nbtree-walk-left", NULL);
+#endif
+
 	for (;;)
 	{
 		Buffer		buf;
@@ -2011,6 +2023,12 @@ _bt_lock_and_validate_left(Relation rel, BlockNumber *blkno,
 			}
 			if (P_RIGHTMOST(opaque) || ++tries > 4)
 				break;
+
+#ifdef USE_INJECTION_POINTS
+			if (!IsCatalogRelation(rel))
+				INJECTION_POINT("nbtree-walk-left-step-right", NULL);
+#endif
+
 			/* step right */
 			*blkno = opaque->btpo_next;
 			buf = _bt_relandgetbuf(rel, buf, *blkno, BT_READ);
@@ -2028,6 +2046,11 @@ _bt_lock_and_validate_left(Relation rel, BlockNumber *blkno,
 		opaque = BTPageGetOpaque(page);
 		if (P_ISDELETED(opaque))
 		{
+#ifdef USE_INJECTION_POINTS
+			if (!IsCatalogRelation(rel))
+				INJECTION_POINT("nbtree-walk-left-deleted", NULL);
+#endif
+
 			/*
 			 * It was deleted.  Move right to first nondeleted page (there
 			 * must be one); that is the page that has acquired the deleted
@@ -2075,6 +2098,11 @@ _bt_lock_and_validate_left(Relation rel, BlockNumber *blkno,
 		/* Start from scratch with new lastcurrblkno's blkno/prev link */
 		*blkno = origblkno = opaque->btpo_prev;
 		_bt_relbuf(rel, buf);
+
+#ifdef USE_INJECTION_POINTS
+		if (!IsCatalogRelation(rel))
+			INJECTION_POINT("nbtree-walk-left-restart", NULL);
+#endif
 	}
 
 	return InvalidBuffer;
@@ -2194,13 +2222,27 @@ _bt_endpoint(IndexScanDesc scan, ScanDirection dir)
 
 	if (!BufferIsValid(so->currPos.buf))
 	{
+#ifdef USE_INJECTION_POINTS
+		if (!IsCatalogRelation(rel))
+			INJECTION_POINT("nbtree-endpoint-empty", NULL);
+#endif
+
 		/*
-		 * Empty index. Lock the whole relation, as nothing finer to lock
-		 * exists.
+		 * Empty index. Lock the whole relation using the approach explained
+		 * at the same point in the _bt_first path.
 		 */
-		PredicateLockRelation(rel, scan->xs_snapshot);
-		_bt_parallel_done(scan);
-		return false;
+		if (IsolationIsSerializable())
+		{
+			PredicateLockRelation(rel, scan->xs_snapshot);
+			so->currPos.buf = _bt_get_endpoint(rel, 0,
+											   ScanDirectionIsBackward(dir));
+		}
+
+		if (!BufferIsValid(so->currPos.buf))
+		{
+			_bt_parallel_done(scan);
+			return false;
+		}
 	}
 
 	page = BufferGetPage(so->currPos.buf);

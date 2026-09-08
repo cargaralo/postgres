@@ -866,7 +866,6 @@ SnapBuildAddCommittedTxn(SnapBuild *builder, TransactionId xid)
 static void
 SnapBuildPurgeOlderTxn(SnapBuild *builder)
 {
-	int			off;
 	TransactionId *workspace;
 	int			surviving_xids = 0;
 
@@ -880,7 +879,7 @@ SnapBuildPurgeOlderTxn(SnapBuild *builder)
 						   builder->committed.xcnt * sizeof(TransactionId));
 
 	/* copy xids that still are interesting to workspace */
-	for (off = 0; off < builder->committed.xcnt; off++)
+	for (size_t off = 0; off < builder->committed.xcnt; off++)
 	{
 		if (NormalTransactionIdPrecedes(builder->committed.xip[off],
 										builder->xmin))
@@ -906,6 +905,8 @@ SnapBuildPurgeOlderTxn(SnapBuild *builder)
 	 */
 	if (builder->catchange.xcnt > 0)
 	{
+		size_t		off;
+
 		/*
 		 * Since catchange.xip is sorted, we find the lower bound of xids that
 		 * are still interesting.
@@ -1936,7 +1937,7 @@ snapshot_not_interesting:
 static void
 SnapBuildRestoreContents(int fd, void *dest, Size size, const char *path)
 {
-	int			readBytes;
+	ssize_t		readBytes;
 
 	pgstat_report_wait_start(WAIT_EVENT_SNAPBUILD_READ);
 	readBytes = read(fd, dest, size);
@@ -1957,7 +1958,7 @@ SnapBuildRestoreContents(int fd, void *dest, Size size, const char *path)
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("could not read file \"%s\": read %d of %zu",
+					 errmsg("could not read file \"%s\": read %zd of %zu",
 							path, readBytes, size)));
 	}
 }

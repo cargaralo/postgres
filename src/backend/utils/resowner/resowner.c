@@ -304,7 +304,7 @@ ResourceOwnerSort(ResourceOwner owner)
 		 */
 		uint32		dst = 0;
 
-		for (int idx = 0; idx < owner->capacity; idx++)
+		for (uint32 idx = 0; idx < owner->capacity; idx++)
 		{
 			if (owner->hash[idx].kind != NULL)
 			{
@@ -347,6 +347,7 @@ ResourceOwnerReleaseAll(ResourceOwner owner, ResourceReleasePhase phase,
 {
 	ResourceElem *items;
 	uint32		nitems;
+	bool		using_arr;
 
 	/*
 	 * ResourceOwnerSort must've been called already.  All the resources are
@@ -358,12 +359,14 @@ ResourceOwnerReleaseAll(ResourceOwner owner, ResourceReleasePhase phase,
 	{
 		items = owner->arr;
 		nitems = owner->narr;
+		using_arr = true;
 	}
 	else
 	{
 		Assert(owner->narr == 0);
 		items = owner->hash;
 		nitems = owner->nhash;
+		using_arr = false;
 	}
 
 	/*
@@ -392,13 +395,20 @@ ResourceOwnerReleaseAll(ResourceOwner owner, ResourceReleasePhase phase,
 			elog(WARNING, "resource was not closed: %s", res_str);
 			pfree(res_str);
 		}
-		kind->ReleaseResource(value);
+
+		/*
+		 * Update stored count to forget the item before calling its
+		 * ReleaseResource method.  This avoids double-free crashes in case an
+		 * error gets thrown within ReleaseResource.
+		 */
 		nitems--;
+		if (using_arr)
+			owner->narr = nitems;
+		else
+			owner->nhash = nitems;
+
+		kind->ReleaseResource(value);
 	}
-	if (owner->nhash == 0)
-		owner->narr = nitems;
-	else
-		owner->nhash = nitems;
 }
 
 
@@ -842,7 +852,7 @@ ResourceOwnerReleaseAllOfKind(ResourceOwner owner, const ResourceOwnerDesc *kind
 	}
 
 	/* Then hash */
-	for (int i = 0; i < owner->capacity; i++)
+	for (uint32 i = 0; i < owner->capacity; i++)
 	{
 		if (owner->hash[i].kind == kind)
 		{

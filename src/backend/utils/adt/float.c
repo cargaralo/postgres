@@ -3456,6 +3456,17 @@ float8_regr_accum(PG_FUNCTION_ARGS)
 			Syy += tmpY * tmpY * scale;
 		if (isnan(commonX) && isnan(commonY))
 			Sxy += tmpX * tmpY * scale;
+		else if (isnan(newvalX) || isinf(newvalX) ||
+				 isnan(newvalY) || isinf(newvalY))
+		{
+			/*
+			 * If one input has been constant so far, but the other one is Inf
+			 * or NaN this time, we must force Sxy to NaN to avoid falsely
+			 * reporting variance zero (compare the special case for the first
+			 * inputs, below).  Sxx and Syy don't have this issue.
+			 */
+			Sxy = get_float8_nan();
+		}
 
 		/*
 		 * Overflow check.  We only report an overflow error when finite
@@ -3965,7 +3976,7 @@ float8_regr_r2(PG_FUNCTION_ARGS)
 	 * Despite all these precautions, this formula can yield results outside
 	 * [0, 1] due to roundoff error.  Clamp it to the expected range.
 	 *
-	 * Note that result is guaranteed to be non-negative becase Sxx and Syy
+	 * Note that result is guaranteed to be non-negative because Sxx and Syy
 	 * are non-negative, so we only need to clamp the upper end of the range.
 	 */
 	if (result > 1)

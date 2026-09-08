@@ -268,7 +268,6 @@ ginNewScanKey(IndexScanDesc scan)
 {
 	ScanKey		scankey = scan->keyData;
 	GinScanOpaque so = (GinScanOpaque) scan->opaque;
-	int			i;
 	int			numExcludeOnly;
 	bool		hasNullQuery = false;
 	bool		attrHasNormalScan[INDEX_MAX_KEYS] = {false};
@@ -282,19 +281,17 @@ ginNewScanKey(IndexScanDesc scan)
 	oldCtx = MemoryContextSwitchTo(so->keyCtx);
 
 	/* if no scan keys provided, allocate extra EVERYTHING GinScanKey */
-	so->keys = (GinScanKey)
-		palloc(Max(scan->numberOfKeys, 1) * sizeof(GinScanKeyData));
+	so->keys = palloc_array(GinScanKeyData, Max(scan->numberOfKeys, 1));
 	so->nkeys = 0;
 
 	/* initialize expansible array of GinScanEntry pointers */
 	so->totalentries = 0;
 	so->allocentries = 32;
-	so->entries = (GinScanEntry *)
-		palloc(so->allocentries * sizeof(GinScanEntry));
+	so->entries = palloc_array(GinScanEntry, so->allocentries);
 
 	so->isVoidRes = false;
 
-	for (i = 0; i < scan->numberOfKeys; i++)
+	for (int i = 0; i < scan->numberOfKeys; i++)
 	{
 		ScanKey		skey = &scankey[i];
 		Datum	   *queryValues;
@@ -358,7 +355,7 @@ ginNewScanKey(IndexScanDesc scan)
 		 * didn't create a nullFlags array, we assume everything is non-null.
 		 * While at it, detect whether any null keys are present.
 		 */
-		categories = (GinNullCategory *) palloc0(nQueryValues * sizeof(GinNullCategory));
+		categories = palloc0_array(GinNullCategory, nQueryValues);
 		if (nullFlags)
 		{
 			int32		j;
@@ -393,7 +390,7 @@ ginNewScanKey(IndexScanDesc scan)
 	 * and be set to normal (excludeOnly = false).
 	 */
 	numExcludeOnly = 0;
-	for (i = 0; i < so->nkeys; i++)
+	for (uint32 i = 0; i < so->nkeys; i++)
 	{
 		GinScanKey	key = &so->keys[i];
 
@@ -423,11 +420,11 @@ ginNewScanKey(IndexScanDesc scan)
 		/* We'd better have made at least one normal key */
 		Assert(numExcludeOnly < so->nkeys);
 		/* Make a temporary array to hold the re-ordered scan keys */
-		tmpkeys = (GinScanKey) palloc(so->nkeys * sizeof(GinScanKeyData));
+		tmpkeys = palloc_array(GinScanKeyData, so->nkeys);
 		/* Re-order the keys ... */
 		iNormalKey = 0;
 		iExcludeOnly = so->nkeys - numExcludeOnly;
-		for (i = 0; i < so->nkeys; i++)
+		for (uint32 i = 0; i < so->nkeys; i++)
 		{
 			GinScanKey	key = &so->keys[i];
 

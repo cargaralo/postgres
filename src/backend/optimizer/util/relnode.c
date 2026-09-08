@@ -746,6 +746,31 @@ set_foreign_rel_properties(RelOptInfo *joinrel, RelOptInfo *outer_rel,
 			joinrel->fdwroutine = outer_rel->fdwroutine;
 		}
 	}
+	else if (OidIsValid(outer_rel->serverid) &&
+			 inner_rel->rtekind == RTE_FUNCTION)
+	{
+		/*
+		 * One side is a foreign relation, the other side is a function RTE.
+		 * If the function is IMMUTABLE, the FDW can absorb the function call
+		 * into the remote query (the result is identical regardless of which
+		 * server evaluates it).  Let the FDW decide whether the join is
+		 * actually shippable; here we just propagate the FDW routine so the
+		 * FDW gets a chance.
+		 */
+		joinrel->serverid = outer_rel->serverid;
+		joinrel->userid = outer_rel->userid;
+		joinrel->useridiscurrent = outer_rel->useridiscurrent;
+		joinrel->fdwroutine = outer_rel->fdwroutine;
+	}
+	else if (OidIsValid(inner_rel->serverid) &&
+			 outer_rel->rtekind == RTE_FUNCTION)
+	{
+		/* Same as just above, with the two sides swapped. */
+		joinrel->serverid = inner_rel->serverid;
+		joinrel->userid = inner_rel->userid;
+		joinrel->useridiscurrent = inner_rel->useridiscurrent;
+		joinrel->fdwroutine = inner_rel->fdwroutine;
+	}
 }
 
 /*
@@ -1735,6 +1760,15 @@ get_baserel_parampathinfo(PlannerInfo *root, RelOptInfo *baserel,
 	{
 		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
 
+		/*
+		 * A clone clause must not be enforced here if an outer join it is
+		 * incompatible with has already been computed below the point of
+		 * evaluation; some other clone is the right one to apply.
+		 */
+		if ((rinfo->has_clone || rinfo->is_clone) &&
+			bms_overlap(rinfo->incompatible_relids, joinrelids))
+			continue;
+
 		if (join_clause_is_movable_into(rinfo,
 										baserel->relids,
 										joinrelids))
@@ -1866,6 +1900,11 @@ get_joinrel_parampathinfo(PlannerInfo *root, RelOptInfo *joinrel,
 	foreach(lc, joinrel->joininfo)
 	{
 		RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+
+		/* As above, reject clones incompatible with a computed outer join */
+		if ((rinfo->has_clone || rinfo->is_clone) &&
+			bms_overlap(rinfo->incompatible_relids, join_and_req))
+			continue;
 
 		if (join_clause_is_movable_into(rinfo,
 										joinrel->relids,

@@ -91,9 +91,8 @@ static int	ldapServiceLookup(const char *purl, PQconninfoOption *options,
 
 /* This is part of the protocol so just define it */
 #define ERRCODE_INVALID_PASSWORD "28P01"
-/* These too */
+/* This too */
 #define ERRCODE_CANNOT_CONNECT_NOW "57P03"
-#define ERRCODE_PROTOCOL_VIOLATION "08P01"
 
 /*
  * Cope with the various platform-specific ways to spell TCP keepalive socket
@@ -1215,7 +1214,7 @@ fill_allowed_sasl_mechs(PGconn *conn)
 	StaticAssertDecl(lengthof(conn->allowed_sasl_mechs) == SASL_MECHANISM_COUNT,
 					 "conn->allowed_sasl_mechs[] is not sufficiently large for holding all supported SASL mechanisms");
 
-	for (int i = 0; i < SASL_MECHANISM_COUNT; i++)
+	for (size_t i = 0; i < SASL_MECHANISM_COUNT; i++)
 		conn->allowed_sasl_mechs[i] = supported_sasl_mechs[i];
 }
 
@@ -1225,7 +1224,7 @@ fill_allowed_sasl_mechs(PGconn *conn)
 static inline void
 clear_allowed_sasl_mechs(PGconn *conn)
 {
-	for (int i = 0; i < lengthof(conn->allowed_sasl_mechs); i++)
+	for (size_t i = 0; i < lengthof(conn->allowed_sasl_mechs); i++)
 		conn->allowed_sasl_mechs[i] = NULL;
 }
 
@@ -1236,7 +1235,7 @@ clear_allowed_sasl_mechs(PGconn *conn)
 static inline int
 index_of_allowed_sasl_mech(PGconn *conn, const pg_fe_sasl_mech *mech)
 {
-	for (int i = 0; i < lengthof(conn->allowed_sasl_mechs); i++)
+	for (size_t i = 0; i < lengthof(conn->allowed_sasl_mechs); i++)
 	{
 		if (conn->allowed_sasl_mechs[i] == mech)
 			return i;
@@ -1256,8 +1255,6 @@ index_of_allowed_sasl_mech(PGconn *conn, const pg_fe_sasl_mech *mech)
 bool
 pqConnectOptions2(PGconn *conn)
 {
-	int			i;
-
 	/*
 	 * Allocate memory for details about each host to which we might possibly
 	 * try to connect.  For that, count the number of elements in the hostaddr
@@ -1281,6 +1278,7 @@ pqConnectOptions2(PGconn *conn)
 	 */
 	if (conn->pghostaddr != NULL && conn->pghostaddr[0] != '\0')
 	{
+		int			i;
 		char	   *s = conn->pghostaddr;
 		bool		more = true;
 
@@ -1302,6 +1300,7 @@ pqConnectOptions2(PGconn *conn)
 
 	if (conn->pghost != NULL && conn->pghost[0] != '\0')
 	{
+		int			i;
 		char	   *s = conn->pghost;
 		bool		more = true;
 
@@ -1326,7 +1325,7 @@ pqConnectOptions2(PGconn *conn)
 	 * Now, for each host slot, identify the type of address spec, and fill in
 	 * the default address if nothing was given.
 	 */
-	for (i = 0; i < conn->nconnhost; i++)
+	for (int i = 0; i < conn->nconnhost; i++)
 	{
 		pg_conn_host *ch = &conn->connhost[i];
 
@@ -1370,6 +1369,7 @@ pqConnectOptions2(PGconn *conn)
 	 */
 	if (conn->pgport != NULL && conn->pgport[0] != '\0')
 	{
+		int			i;
 		char	   *s = conn->pgport;
 		bool		more = true;
 
@@ -1453,7 +1453,7 @@ pqConnectOptions2(PGconn *conn)
 
 		if (conn->pgpassfile != NULL && conn->pgpassfile[0] != '\0')
 		{
-			for (i = 0; i < conn->nconnhost; i++)
+			for (int i = 0; i < conn->nconnhost; i++)
 			{
 				/*
 				 * Try to get a password for this host from file.  We use host
@@ -1639,6 +1639,8 @@ pqConnectOptions2(PGconn *conn)
 
 				if (negated)
 				{
+					int			i;
+
 					/* Remove the existing mechanism from the list. */
 					i = index_of_allowed_sasl_mech(conn, mech);
 					if (i < 0)
@@ -1648,6 +1650,8 @@ pqConnectOptions2(PGconn *conn)
 				}
 				else
 				{
+					int			i;
+
 					/*
 					 * Find a space to put the new mechanism (after making
 					 * sure it's not already there).
@@ -1721,7 +1725,7 @@ pqConnectOptions2(PGconn *conn)
 				| (1 << AUTH_REQ_SASL_CONT)
 				| (1 << AUTH_REQ_SASL_FIN);
 
-			for (i = 0; i < lengthof(conn->allowed_sasl_mechs); i++)
+			for (size_t i = 0; i < lengthof(conn->allowed_sasl_mechs); i++)
 			{
 				if (conn->allowed_sasl_mechs[i])
 				{
@@ -2054,7 +2058,6 @@ pqConnectOptions2(PGconn *conn)
 			libpq_append_conn_error(conn, "invalid SCRAM client key length: %d", len);
 			return false;
 		}
-		conn->scram_client_key_len = len;
 	}
 
 	if (conn->scram_server_key)
@@ -2077,7 +2080,6 @@ pqConnectOptions2(PGconn *conn)
 			libpq_append_conn_error(conn, "invalid SCRAM server key length: %d", len);
 			return false;
 		}
-		conn->scram_server_key_len = len;
 	}
 
 	/*
@@ -2113,7 +2115,7 @@ pqConnectOptions2(PGconn *conn)
 		 * last integer last).  The swap step can be optimized by combining it
 		 * with the insertion.
 		 */
-		for (i = 1; i < conn->nconnhost; i++)
+		for (int i = 1; i < conn->nconnhost; i++)
 		{
 			int			j = pg_prng_uint64_range(&conn->prng_state, 0, i);
 			pg_conn_host temp = conn->connhost[j];
@@ -2147,13 +2149,15 @@ pqConnectOptions2(PGconn *conn)
 	else
 	{
 		/*
-		 * Default to PG_PROTOCOL_GREASE, which is larger than all real
-		 * versions, to test negotiation. The server should automatically
-		 * downgrade to a supported version.
-		 *
-		 * This behavior is for 19beta only. It will be reverted before RC1.
+		 * To not break connecting to older servers/poolers that do not yet
+		 * support NegotiateProtocolVersion, default to the 3.0 protocol at
+		 * least for a while longer. Except when min_protocol_version is set
+		 * to something larger, then we might as well default to the latest.
 		 */
-		conn->max_pversion = PG_PROTOCOL_GREASE;
+		if (conn->min_pversion > PG_PROTOCOL(3, 0))
+			conn->max_pversion = PG_PROTOCOL_LATEST;
+		else
+			conn->max_pversion = PG_PROTOCOL(3, 0);
 	}
 
 	if (conn->min_pversion > conn->max_pversion)
@@ -4159,32 +4163,6 @@ keep_going:						/* We will come back to here until there is
 					/* Check to see if we should mention pgpassfile */
 					pgpassfileWarning(conn);
 
-					/*
-					 * ...and whether we should mention grease. If the error
-					 * message contains the PG_PROTOCOL_GREASE number (in
-					 * major.minor, decimal, or hex format) or a complaint
-					 * about a protocol violation before we've even started an
-					 * authentication exchange, it's probably caused by a
-					 * grease interaction.
-					 */
-					if (conn->max_pversion == PG_PROTOCOL_GREASE &&
-						!conn->auth_req_received)
-					{
-						const char *sqlstate = PQresultErrorField(conn->result,
-																  PG_DIAG_SQLSTATE);
-
-						if ((sqlstate &&
-							 strcmp(sqlstate, ERRCODE_PROTOCOL_VIOLATION) == 0) ||
-							(conn->errorMessage.len > 0 &&
-							 (strstr(conn->errorMessage.data, "3.9999") ||
-							  strstr(conn->errorMessage.data, "206607") ||
-							  strstr(conn->errorMessage.data, "3270F") ||
-							  strstr(conn->errorMessage.data, "3270f"))))
-						{
-							libpq_append_grease_info(conn);
-						}
-					}
-
 					CONNECTION_FAILED();
 				}
 				/* Handle NegotiateProtocolVersion */
@@ -4412,14 +4390,6 @@ keep_going:						/* We will come back to here until there is
 						conn->errorMessage.data[conn->errorMessage.len - 1] != '\n')
 						appendPQExpBufferChar(&conn->errorMessage, '\n');
 					PQclear(res);
-					goto error_return;
-				}
-
-				if (conn->max_pversion == PG_PROTOCOL_GREASE &&
-					conn->pversion == PG_PROTOCOL_GREASE)
-				{
-					libpq_append_conn_error(conn, "server incorrectly accepted \"grease\" protocol version 3.9999 without negotiation");
-					libpq_append_grease_info(conn);
 					goto error_return;
 				}
 
@@ -5517,10 +5487,10 @@ ldapServiceLookup(const char *purl, PQconninfoOption *options,
 	int			port = LDAP_DEF_PORT,
 				scope,
 				rc,
-				size,
 				state,
 				oldstate,
 				i;
+	size_t		size;
 #ifndef WIN32
 	int			msgid;
 #endif

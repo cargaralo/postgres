@@ -43,6 +43,22 @@ $node->command_fails(
 		'--start',
 	],
 	'no destination file');
+$node->command_fails_like(
+	[ 'pg_recvlogical', '--startpos' => '123456789/0' ],
+	qr/error: could not parse start position/,
+	'start position with first component wider than 32 bits');
+$node->command_fails_like(
+	[ 'pg_recvlogical', '--startpos' => '0x1/0' ],
+	qr/error: could not parse start position/,
+	'start position with 0x prefix');
+$node->command_fails_like(
+	[ 'pg_recvlogical', '--endpos' => '0/123456789' ],
+	qr/error: could not parse end position/,
+	'end position with second component wider than 32 bits');
+$node->command_fails_like(
+	[ 'pg_recvlogical', '--endpos' => '1/2/3' ],
+	qr/error: could not parse end position/,
+	'end position with trailing garbage');
 
 $node->command_ok(
 	[
@@ -198,6 +214,8 @@ my $recv = IPC::Run::start(
 # Wait for pg_recvlogical to receive and write the first INSERT
 my $first_ins = wait_for_file($outfile, qr/INSERT/);
 
+my $log_offset = -s $node->logfile;
+
 # Terminate the walsender to force pg_recvlogical to reconnect
 my $backend_pid = $node->safe_psql('postgres',
 	"SELECT active_pid FROM pg_replication_slots WHERE slot_name = 'reconnect_test'"
@@ -205,9 +223,8 @@ my $backend_pid = $node->safe_psql('postgres',
 $node->safe_psql('postgres', "SELECT pg_terminate_backend($backend_pid)");
 
 # Wait for pg_recvlogical to reconnect
-$node->poll_query_until('postgres',
-	"SELECT active_pid IS NOT NULL AND active_pid != $backend_pid FROM pg_replication_slots WHERE slot_name = 'reconnect_test'"
-) or die "Timed out while waiting for pg_recvlogical to reconnect";
+$node->wait_for_log(qr/acquired logical replication slot \"reconnect_test\"/,
+	$log_offset);
 
 # Insert the second record for this test
 $node->safe_psql('postgres', 'INSERT INTO test_table VALUES (2)');
@@ -280,6 +297,80 @@ SKIP:
 	$mode = sprintf('%04o', (stat($outfile))[2] & 07777);
 	is($mode, '0640',
 		'pg_recvlogical output file respects group permissions (0640)');
+}
+
+SKIP:
+{
+	skip "signals not supported on Windows", 4
+	  if ($Config{osname} eq 'MSWin32' || $Config{osname} eq 'cygwin');
+
+	my $signal_outfile = $node->basedir . '/signal_shutdown.out';
+
+	$node->command_ok(
+		[
+			'pg_recvlogical',
+			'--slot' => 'signal_shutdown_test',
+			'--dbname' => $node->connstr('postgres'),
+			'--create-slot',
+		],
+		'slot created for signal shutdown test');
+
+	@pg_recvlogical_cmd = (
+		'pg_recvlogical',
+		'--slot' => 'signal_shutdown_test',
+		'--dbname' => $node->connstr('postgres'),
+		'--start',
+		'--file' => $signal_outfile,
+		'--fsync-interval' => '100',
+		'--status-interval' => '100');
+
+	$recv = IPC::Run::start(
+		[@pg_recvlogical_cmd],
+		'>' => \$stdout,
+		'2>' => \$stderr);
+
+	$node->safe_psql('postgres', 'INSERT INTO test_table VALUES (42)');
+
+	# Wait for not only INSERT but also COMMIT because the inserted
+	# change might not yet be safely confirmable by final feedback until
+	# the transaction has committed.
+	wait_for_file($signal_outfile,
+		qr/test_table: INSERT: x\[integer\]:42\b.*?\bCOMMIT\b/s);
+
+	$recv->signal('TERM');
+	$recv->finish();
+
+	$nextlsn =
+	  $node->safe_psql('postgres', 'SELECT pg_current_wal_insert_lsn()');
+	chomp($nextlsn);
+
+	$node->command_ok(
+		[
+			'pg_recvlogical',
+			'--slot' => 'signal_shutdown_test',
+			'--dbname' => $node->connstr('postgres'),
+			'--start',
+			'--endpos' => $nextlsn,
+			'--no-loop',
+			'--file' => $signal_outfile,
+		],
+		'pg_recvlogical exits after signal without replaying flushed data');
+
+	my $signal_data = slurp_file($signal_outfile);
+	my $signal_count =
+	  (() = $signal_data =~ /test_table: INSERT: x\[integer\]:42\b/g);
+	is($signal_count, 1,
+		'pg_recvlogical does not duplicate decoded changes after signal shutdown'
+	);
+
+	$node->command_ok(
+		[
+			'pg_recvlogical',
+			'--slot' => 'signal_shutdown_test',
+			'--dbname' => $node->connstr('postgres'),
+			'--drop-slot'
+		],
+		'signal_shutdown_test slot dropped');
 }
 
 $node->command_ok(

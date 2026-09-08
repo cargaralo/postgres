@@ -243,6 +243,17 @@ DELETE FROM foo WHERE f1 = 5
   RETURNING old.tableoid::regclass, old.ctid, old.*,
             new.tableoid::regclass, new.ctid, new.*, *;
 
+-- Parenthesized OLD and NEW
+INSERT INTO foo VALUES (6, 'paren-test', 60, 600)
+  RETURNING old, (old).f4, (old).*,
+            new, (new).f4, (new).*;
+UPDATE foo SET f4 = 700 WHERE f1 = 6
+  RETURNING old, (old).f4, (old).*,
+            new, (new).f4, (new).*;
+DELETE FROM foo WHERE f1 = 6
+  RETURNING old, (old).f4, (old).*,
+            new, (new).f4, (new).*;
+
 -- RETURNING OLD and NEW from subquery
 EXPLAIN (verbose, costs off)
 INSERT INTO foo VALUES (5, 'subquery test')
@@ -277,6 +288,11 @@ CREATE RULE foo_del_rule AS ON DELETE TO foo DO INSTEAD
 EXPLAIN (verbose, costs off)
 DELETE FROM foo WHERE f1 = 4 RETURNING old.*,new.*, *;
 DELETE FROM foo WHERE f1 = 4 RETURNING old.*,new.*, *;
+
+-- system columns are not available when the query is rewritten by a rule
+DELETE FROM foo WHERE f1 = 4 RETURNING tableoid;
+DELETE FROM foo WHERE f1 = 4 RETURNING old.ctid;
+DELETE FROM foo WHERE f1 = 4 RETURNING new.xmin;
 
 -- UPDATE on view with rule
 EXPLAIN (verbose, costs off)

@@ -107,6 +107,65 @@ extern "C++"
  */
 
 /*
+ * Not all compilers follow gcc's names of macros for particular target
+ * architectures.  Let's standardize on gcc's names (with trailing __),
+ * and cause those to become defined here if they are not already.
+ *
+ * Note: while this list is alphabetical, it's necessary to check _M_ARM64
+ * before _M_AMD64, because Microsoft's ARM64EC environment defines both.
+ */
+#if defined(__arm__) || defined(__arm)
+#ifndef __arm__
+#define __arm__ 1
+#endif
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#ifndef __aarch64__
+#define __aarch64__ 1
+#endif
+#elif defined(__loongarch64__) || defined(__loongarch64)
+#ifndef __loongarch64__
+#define __loongarch64__ 1
+#endif
+#elif defined(__mips__)
+/* no work */
+#elif defined(__mips64__)
+/* no work */
+#elif defined(__powerpc__) || defined(__ppc__)
+#ifndef __powerpc__
+#define __powerpc__ 1
+#endif
+#elif defined(__powerpc64__) || defined(__ppc64__)
+#ifndef __powerpc64__
+#define __powerpc64__ 1
+#endif
+#elif defined(__riscv)
+/* RISC-V doesn't follow the common naming pattern, so force it */
+#if SIZEOF_VOID_P == 8
+#define __riscv64__ 1
+#else
+#define __riscv__ 1
+#endif
+#elif defined(__s390__)
+/* no work */
+#elif defined(__s390x__)
+/* no work */
+#elif defined(__sparc__) || defined(__sparc)
+#ifndef __sparc__
+#define __sparc__ 1
+#endif
+#elif defined(__i386__) || defined (__i386) || defined(_M_IX86)
+#ifndef __i386__
+#define __i386__ 1
+#endif
+#elif defined(__x86_64__) || defined(__x86_64) || defined (__amd64) || defined(_M_AMD64)
+#ifndef __x86_64__
+#define __x86_64__ 1
+#endif
+#else
+#error "cannot identify target architecture"
+#endif
+
+/*
  * Disable "inline" if PG_FORCE_DISABLE_INLINE is defined.
  * This is used to work around compiler bugs and might also be useful for
  * investigatory purposes.
@@ -289,20 +348,20 @@ extern "C++"
 #endif
 
 /*
- * Use "pg_attribute_always_inline" in place of "inline" for functions that
+ * Use "pg_always_inline" in place of "inline" for functions that
  * we wish to force inlining of, even when the compiler's heuristics would
  * choose not to.  But, if possible, don't force inlining in unoptimized
  * debug builds.
  */
 #if defined(__GNUC__) && defined(__OPTIMIZE__)
 /* GCC supports always_inline via __attribute__ */
-#define pg_attribute_always_inline __attribute__((always_inline)) inline
+#define pg_always_inline __attribute__((always_inline)) inline
 #elif defined(_MSC_VER)
 /* MSVC has a special keyword for this */
-#define pg_attribute_always_inline __forceinline
+#define pg_always_inline __forceinline
 #else
 /* Otherwise, the best we can do is to say "inline" */
-#define pg_attribute_always_inline inline
+#define pg_always_inline inline
 #endif
 
 /*
@@ -1022,24 +1081,10 @@ pg_noreturn extern void ExceptionalCondition(const char *conditionName,
  * rationale for the precise behavior of this implementation.  See
  * <https://stackoverflow.com/questions/31311748> about the C++
  * implementation.
- *
- * For compilers that don't support this, we fall back on a kluge that assumes
- * the compiler will complain about a negative width for a struct bit-field.
- * This will not include a helpful error message, but it beats not getting an
- * error at all.
  */
 #ifndef __cplusplus
-#if !defined(_MSC_VER) || _MSC_VER >= 1933
 #define StaticAssertExpr(condition, errmessage) \
 	((void) sizeof(struct {static_assert(condition, errmessage); char a;}))
-#else							/* _MSC_VER < 1933 */
-/*
- * This compiler is buggy and fails to compile the previous variant; use a
- * fallback implementation.
- */
-#define StaticAssertExpr(condition, errmessage) \
-	((void) sizeof(struct { int static_assert_failure : (condition) ? 1 : -1; }))
-#endif							/* _MSC_VER < 1933 */
 #else							/* __cplusplus */
 #define StaticAssertExpr(condition, errmessage) \
 	([]{static_assert(condition, errmessage);})
@@ -1049,29 +1094,24 @@ pg_noreturn extern void ExceptionalCondition(const char *conditionName,
 /*
  * Compile-time checks that a variable (or expression) has the specified type.
  *
+ * The type must not have top-level qualifiers (const, volatile) and must not
+ * be an array (use pointer instead).  (This wouldn't work because _Generic
+ * does lvalue conversion on the controlling expression, which drops
+ * qualifiers and converts arrays to pointers.)  Qualifiers inside pointers
+ * are allowed.
+ *
  * StaticAssertVariableIsOfType() can be used as a declaration.
  * StaticAssertVariableIsOfTypeMacro() is intended for use in macros, eg
  *		#define foo(x) (StaticAssertVariableIsOfTypeMacro(x, int), bar(x))
  *
- * If we don't have __builtin_types_compatible_p, we can still assert that
- * the types have the same size.  This is far from ideal (especially on 32-bit
- * platforms) but it provides at least some coverage.
+ * Note that these do not work in C++.
  */
-#ifdef HAVE__BUILTIN_TYPES_COMPATIBLE_P
 #define StaticAssertVariableIsOfType(varname, typename) \
-	StaticAssertDecl(__builtin_types_compatible_p(typeof(varname), typename), \
+	StaticAssertDecl(_Generic((varname), typename: 1, default: 0), \
 	CppAsString(varname) " does not have type " CppAsString(typename))
 #define StaticAssertVariableIsOfTypeMacro(varname, typename) \
-	(StaticAssertExpr(__builtin_types_compatible_p(typeof(varname), typename), \
+	(StaticAssertExpr(_Generic((varname), typename: 1, default: 0), \
 	 CppAsString(varname) " does not have type " CppAsString(typename)))
-#else							/* !HAVE__BUILTIN_TYPES_COMPATIBLE_P */
-#define StaticAssertVariableIsOfType(varname, typename) \
-	StaticAssertDecl(sizeof(varname) == sizeof(typename), \
-	CppAsString(varname) " does not have type " CppAsString(typename))
-#define StaticAssertVariableIsOfTypeMacro(varname, typename) \
-	(StaticAssertExpr(sizeof(varname) == sizeof(typename), \
-	 CppAsString(varname) " does not have type " CppAsString(typename)))
-#endif							/* HAVE__BUILTIN_TYPES_COMPATIBLE_P */
 
 
 /* ----------------------------------------------------------------
@@ -1308,8 +1348,13 @@ typedef struct PGAlignedXLogBlock PGAlignedXLogBlock;
 
 /*
  * Macro that allows to cast constness and volatile away from an expression, but doesn't
- * allow changing the underlying type.  Enforcement of the latter
- * currently only works for gcc like compilers.
+ * allow changing the underlying type.
+ *
+ * This is only meant to work for qualifiers behind at least one level of
+ * pointer.  (In the C implementation, the StaticAssertVariableIsOfTypeMacro
+ * will drop top-level qualifiers, so with a non-pointer, the static assertion
+ * will fail.  In the C++ implementation, const_cast will error for
+ * non-pointers.)
  *
  * Please note IT IS NOT SAFE to cast constness away if the result will ever
  * be modified (it would be undefined behaviour). Doing so anyway can cause
@@ -1337,8 +1382,19 @@ typedef struct PGAlignedXLogBlock PGAlignedXLogBlock;
  * SSE2 instructions are part of the spec for the 64-bit x86 ISA. We assume
  * that compilers targeting this architecture understand SSE2 intrinsics.
  */
-#if (defined(__x86_64__) || defined(_M_AMD64))
+#if defined(__x86_64__)
 #define USE_SSE2
+
+#else							/* ! x86_64 */
+
+/*
+ * In "universal" macOS builds, it's possible for AVX-related symbols to
+ * get defined if the build host is x86_64, but we mustn't try to build
+ * that code when cross-compiling to aarch64.
+ */
+#undef USE_AVX2_WITH_RUNTIME_CHECK
+#undef USE_AVX512_CRC32C_WITH_RUNTIME_CHECK
+#undef USE_AVX512_POPCNT_WITH_RUNTIME_CHECK
 
 /*
  * We use the Neon instructions if the compiler provides access to them (as
@@ -1348,9 +1404,10 @@ typedef struct PGAlignedXLogBlock PGAlignedXLogBlock;
  * could not realistically use it there without a run-time check, which seems
  * not worth the trouble for now.
  */
-#elif defined(__aarch64__) && defined(__ARM_NEON)
+#if defined(__aarch64__) && defined(__ARM_NEON)
 #define USE_NEON
 #endif
+#endif							/* x86_64 */
 
 /* ----------------------------------------------------------------
  *				Section 9: system-specific hacks

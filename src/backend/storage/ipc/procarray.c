@@ -519,7 +519,7 @@ ProcArrayAdd(PGPROC *proc)
 			&ProcGlobal->statusFlags[index],
 			movecount * sizeof(*ProcGlobal->statusFlags));
 
-	arrayP->pgprocnos[index] = GetNumberFromPGProc(proc);
+	arrayP->pgprocnos[index] = pgprocno;
 	proc->pgxactoff = index;
 	ProcGlobal->xids[index] = proc->xid;
 	ProcGlobal->subxidStates[index] = proc->subxidStatus;
@@ -2158,9 +2158,17 @@ GetSnapshotData(Snapshot snapshot)
 		snapshot->subxip = (TransactionId *)
 			malloc(GetMaxSnapshotSubxidCount() * sizeof(TransactionId));
 		if (snapshot->subxip == NULL)
+		{
+			/*
+			 * Clean up the Snapshot state before throwing the error, so that
+			 * a retry does not see a partially-initialized snapshot.
+			 */
+			free(snapshot->xip);
+			snapshot->xip = NULL;
 			ereport(ERROR,
 					(errcode(ERRCODE_OUT_OF_MEMORY),
 					 errmsg("out of memory")));
+		}
 	}
 
 	/*
@@ -2479,8 +2487,13 @@ ProcArrayInstallImportedXmin(TransactionId xmin,
 	if (!sourcevxid)
 		return false;
 
-	/* Get lock so source xact can't end while we're doing this */
-	LWLockAcquire(ProcArrayLock, LW_SHARED);
+	/*
+	 * Take the lock in exclusive mode to ensure that installing xmin is
+	 * atomic with our check that the source transaction is still running.
+	 * (Using shared mode risks a concurrent VACUUM whose ComputeXidHorizons()
+	 * call fails to observe the xmin in either the source proc or our own.)
+	 */
+	LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
 
 	/*
 	 * Find the PGPROC entry of the source transaction. (This could use

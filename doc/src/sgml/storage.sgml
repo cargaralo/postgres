@@ -417,7 +417,7 @@ described in more detail below.
 
 <para>
 Out-of-line values are divided (after compression if used) into chunks of at
-most <symbol>TOAST_MAX_CHUNK_SIZE</symbol> bytes (by default this value is chosen
+most <symbol>TOAST_OID_MAX_CHUNK_SIZE</symbol> bytes (by default this value is chosen
 so that four chunk rows will fit on a page, making it about 2000 bytes).
 Each chunk is stored as a separate row in the <acronym>TOAST</acronym> table
 belonging to the owning table.  Every
@@ -797,7 +797,7 @@ data. Empty in ordinary tables.</entry>
   (<structname>PageHeaderData</structname>). Its format is detailed in <xref
   linkend="pageheaderdata-table"/>. The first field tracks the most
   recent WAL entry related to this page. The second field contains
-  the page checksum if <xref linkend="app-initdb-data-checksums"/> are
+  the page checksum if <link linkend="checksums">data checksums</link> are
   enabled.  Next is a 2-byte field containing flag bits. This is followed
   by three 2-byte integer fields (<structfield>pd_lower</structfield>,
   <structfield>pd_upper</structfield>, and

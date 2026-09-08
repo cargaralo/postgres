@@ -560,6 +560,14 @@ typedef struct XLogCtlData
 	uint32		data_checksum_version;
 
 	slock_t		info_lck;		/* locks shared variables shown above */
+
+	/*
+	 * lastChecksumChangeRecPtr points to the end of the last XLOG2_CHECKSUMS
+	 * record inserted or replayed, i.e. the last change of
+	 * data_checksum_version.  InvalidXLogRecPtr if the state hasn't changed
+	 * since the server started.
+	 */
+	pg_atomic_uint64 lastChecksumChangeRecPtr;
 } XLogCtlData;
 
 /*
@@ -1143,9 +1151,9 @@ XLogInsertRecord(XLogRecData *rdata,
  *
  * NB: Testing shows that XLogInsertRecord runs faster if this code is inlined;
  * however, because there are two call sites, the compiler is reluctant to
- * inline. We use pg_attribute_always_inline here to try to convince it.
+ * inline. We use pg_always_inline here to try to convince it.
  */
-static pg_attribute_always_inline void
+static pg_always_inline void
 ReserveXLogInsertLocation(int size, XLogRecPtr *StartPos, XLogRecPtr *EndPos,
 						  XLogRecPtr *PrevPtr)
 {
@@ -2455,9 +2463,6 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 				written = pg_pwrite(openLogFile, from, nleft, startoffset);
 				pgstat_report_wait_end();
 
-				pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL,
-										IOOP_WRITE, start, 1, written);
-
 				if (written <= 0)
 				{
 					char		xlogfname[MAXFNAMELEN];
@@ -2475,6 +2480,9 @@ XLogWrite(XLogwrtRqst WriteRqst, TimeLineID tli, bool flexible)
 							 errmsg("could not write to log file \"%s\" at offset %u, length %zu: %m",
 									xlogfname, startoffset, nleft)));
 				}
+
+				pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL,
+										IOOP_WRITE, start, 1, written);
 				nleft -= written;
 				from += written;
 				startoffset += written;
@@ -2671,8 +2679,7 @@ XLogSetAsyncXactLSN(XLogRecPtr asyncXactLSN)
 
 	if (wakeup)
 	{
-		volatile PROC_HDR *procglobal = ProcGlobal;
-		ProcNumber	walwriterProc = procglobal->walwriterProc;
+		ProcNumber	walwriterProc = pg_atomic_read_u32(&ProcGlobal->walwriterProc);
 
 		if (walwriterProc != INVALID_PROC_NUMBER)
 			SetLatch(&GetPGProcByNumber(walwriterProc)->procLatch);
@@ -3331,14 +3338,6 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 	}
 	pgstat_report_wait_end();
 
-	/*
-	 * A full segment worth of data is written when using wal_init_zero. One
-	 * byte is written when not using it.
-	 */
-	pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_INIT, IOOP_WRITE,
-							io_start, 1,
-							wal_init_zero ? wal_segment_size : 1);
-
 	if (save_errno)
 	{
 		/*
@@ -3354,6 +3353,14 @@ XLogFileInitInternal(XLogSegNo logsegno, TimeLineID logtli,
 				(errcode_for_file_access(),
 				 errmsg("could not write to file \"%s\": %m", tmppath)));
 	}
+
+	/*
+	 * A full segment worth of data is written when using wal_init_zero. One
+	 * byte is written when not using it.
+	 */
+	pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_INIT, IOOP_WRITE,
+							io_start, 1,
+							wal_init_zero ? wal_segment_size : 1);
 
 	/* Measure I/O timing when flushing segment */
 	io_start = pgstat_prepare_io_time(track_wal_io_timing);
@@ -3506,7 +3513,7 @@ XLogFileCopy(TimeLineID destTLI, XLogSegNo destsegno,
 	 */
 	for (nbytes = 0; nbytes < wal_segment_size; nbytes += sizeof(buffer))
 	{
-		int			nread;
+		ssize_t		nread;
 
 		nread = upto - nbytes;
 
@@ -3519,7 +3526,7 @@ XLogFileCopy(TimeLineID destTLI, XLogSegNo destsegno,
 
 		if (nread > 0)
 		{
-			int			r;
+			ssize_t		r;
 
 			if (nread > sizeof(buffer))
 				nread = sizeof(buffer);
@@ -3535,14 +3542,14 @@ XLogFileCopy(TimeLineID destTLI, XLogSegNo destsegno,
 				else
 					ereport(ERROR,
 							(errcode(ERRCODE_DATA_CORRUPTED),
-							 errmsg("could not read file \"%s\": read %d of %zu",
-									path, r, (Size) nread)));
+							 errmsg("could not read file \"%s\": read %zd of %zu",
+									path, r, nread)));
 			}
 			pgstat_report_wait_end();
 		}
 		errno = 0;
 		pgstat_report_wait_start(WAIT_EVENT_WAL_COPY_WRITE);
-		if ((int) write(fd, buffer.data, sizeof(buffer)) != (int) sizeof(buffer))
+		if (write(fd, buffer.data, sizeof(buffer)) != sizeof(buffer))
 		{
 			int			save_errno = errno;
 
@@ -4284,6 +4291,7 @@ InitControlFile(uint64 sysidentifier, uint32 data_checksum_version)
 	ControlFile->wal_log_hints = wal_log_hints;
 	ControlFile->track_commit_timestamp = track_commit_timestamp;
 	ControlFile->data_checksum_version = data_checksum_version;
+	ControlFile->data_checksum_version_init = data_checksum_version;
 
 	/*
 	 * Set the data_checksum_version value into XLogCtl, which is where all
@@ -4316,7 +4324,7 @@ WriteControlFile(void)
 	ControlFile->nameDataLen = NAMEDATALEN;
 	ControlFile->indexMaxKeys = INDEX_MAX_KEYS;
 
-	ControlFile->toast_max_chunk_size = TOAST_MAX_CHUNK_SIZE;
+	ControlFile->toast_max_chunk_size = TOAST_OID_MAX_CHUNK_SIZE;
 	ControlFile->loblksize = LOBLKSIZE;
 
 	ControlFile->float8ByVal = true;	/* vestigial */
@@ -4408,7 +4416,7 @@ ReadControlFile(void)
 	pg_crc32c	crc;
 	int			fd;
 	char		wal_segsz_str[20];
-	int			r;
+	ssize_t		r;
 
 	/*
 	 * Read data...
@@ -4433,7 +4441,7 @@ ReadControlFile(void)
 		else
 			ereport(PANIC,
 					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("could not read file \"%s\": read %d of %zu",
+					 errmsg("could not read file \"%s\": read %zd of %zu",
 							XLOG_CONTROL_FILE, r, sizeof(ControlFileData))));
 	}
 	pgstat_report_wait_end();
@@ -4569,15 +4577,15 @@ ReadControlFile(void)
 						   "INDEX_MAX_KEYS", ControlFile->indexMaxKeys,
 						   "INDEX_MAX_KEYS", INDEX_MAX_KEYS),
 				 errhint("It looks like you need to recompile or initdb.")));
-	if (ControlFile->toast_max_chunk_size != TOAST_MAX_CHUNK_SIZE)
+	if (ControlFile->toast_max_chunk_size != TOAST_OID_MAX_CHUNK_SIZE)
 		ereport(FATAL,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("database files are incompatible with server"),
 		/* translator: %s is a variable name and %d is its value */
 				 errdetail("The database cluster was initialized with %s %d,"
 						   " but the server was compiled with %s %d.",
-						   "TOAST_MAX_CHUNK_SIZE", ControlFile->toast_max_chunk_size,
-						   "TOAST_MAX_CHUNK_SIZE", (int) TOAST_MAX_CHUNK_SIZE),
+						   "TOAST_OID_MAX_CHUNK_SIZE", ControlFile->toast_max_chunk_size,
+						   "TOAST_OID_MAX_CHUNK_SIZE", (int) TOAST_OID_MAX_CHUNK_SIZE),
 				 errhint("It looks like you need to recompile or initdb.")));
 	if (ControlFile->loblksize != LOBLKSIZE)
 		ereport(FATAL,
@@ -4736,6 +4744,23 @@ DataChecksumsNeedVerify(void)
 }
 
 /*
+ * GetLastChecksumChangeRecPtr
+ *		Returns the location of the last data checksum state change
+ *
+ * Offline state changes by pg_checksums leave no trace here; callers must
+ * also inspect the current state.
+ *
+ * No barrier semantics are needed: pages reach disk under a new checksum
+ * state only after their writer absorbed the procsignal barrier for the
+ * change, which is emitted after the new location became visible.
+ */
+XLogRecPtr
+GetLastChecksumChangeRecPtr(void)
+{
+	return pg_atomic_read_u64(&XLogCtl->lastChecksumChangeRecPtr);
+}
+
+/*
  * SetDataChecksumsOnInProgress
  *		Sets the data checksum state to "inprogress-on" to enable checksums
  *
@@ -4844,6 +4869,8 @@ SetDataChecksumsOn(void)
 
 	MyProc->delayChkptFlags &= ~DELAY_CHKPT_START;
 	END_CRIT_SECTION();
+
+	INJECTION_POINT("datachecksums-on-before-checkpoint", NULL);
 
 	RequestCheckpoint(CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_FAST);
 	WaitForProcSignalBarrier(barrier);
@@ -5435,6 +5462,7 @@ XLOGShmemInit(void *arg)
 	pg_atomic_init_u64(&XLogCtl->logWriteResult, InvalidXLogRecPtr);
 	pg_atomic_init_u64(&XLogCtl->logFlushResult, InvalidXLogRecPtr);
 	pg_atomic_init_u64(&XLogCtl->unloggedLSN, InvalidXLogRecPtr);
+	pg_atomic_init_u64(&XLogCtl->lastChecksumChangeRecPtr, InvalidXLogRecPtr);
 }
 
 /*
@@ -6235,6 +6263,7 @@ StartupXLOG(void)
 			 * during recovery and need not be started yet.
 			 */
 			StartupSUBTRANS(oldestActiveXID);
+			SetRecoverySubtransInitialized();
 
 			/*
 			 * If we're beginning at a shutdown checkpoint, we know that
@@ -6570,6 +6599,8 @@ StartupXLOG(void)
 	/* If this is archive recovery, perform post-recovery cleanup actions. */
 	if (ArchiveRecoveryRequested)
 		CleanupAfterArchiveRecovery(EndOfLogTLI, EndOfLog, newTLI);
+
+	INJECTION_POINT("promotion-after-wal-segment-cleanup", NULL);
 
 	/*
 	 * Local WAL inserts enabled, so it's time to finish initialization of
@@ -8048,9 +8079,6 @@ static void
 CheckPointGuts(XLogRecPtr checkPointRedo, int flags)
 {
 	CheckPointRelationMap();
-	CheckPointReplicationSlots(flags & CHECKPOINT_IS_SHUTDOWN);
-	CheckPointSnapBuild();
-	CheckPointLogicalRewriteHeap();
 	CheckPointReplicationOrigin();
 
 	/* Write out all dirty data in SLRUs and the main buffer pool */
@@ -8070,7 +8098,17 @@ CheckPointGuts(XLogRecPtr checkPointRedo, int flags)
 	CheckpointStats.ckpt_sync_end_t = GetCurrentTimestamp();
 	TRACE_POSTGRESQL_BUFFER_CHECKPOINT_DONE();
 
-	/* We deliberately delay 2PC checkpointing as long as possible */
+	/*
+	 * Run replication slot checkpointing after buffer writes and
+	 * ProcessSyncRequests(), so WAL removal uses a fresher slot retention
+	 * horizon and avoids retaining WAL segments that slots no longer need.
+	 * Then clean up logical snapshots and rewrite mappings based on the
+	 * updated saved restart LSNs.  Also delay 2PC checkpointing as long as
+	 * possible.
+	 */
+	CheckPointReplicationSlots(flags & CHECKPOINT_IS_SHUTDOWN);
+	CheckPointSnapBuild();
+	CheckPointLogicalRewriteHeap();
 	CheckPointTwoPhase(checkPointRedo);
 }
 
@@ -8355,10 +8393,10 @@ CreateRestartPoint(int flags)
 	 * Truncate pg_subtrans if possible.  We can throw away all data before
 	 * the oldest XMIN of any running transaction.  No future transaction will
 	 * attempt to reference any pg_subtrans entry older than that (see Asserts
-	 * in subtrans.c).  When hot standby is disabled, though, we mustn't do
-	 * this because StartupSUBTRANS hasn't been called yet.
+	 * in subtrans.c).  During recovery, don't truncate pg_subtrans until hot
+	 * standby initialization has started it.
 	 */
-	if (EnableHotStandby)
+	if (RecoverySubtransInitialized())
 		TruncateSUBTRANS(GetOldestTransactionIdConsideredRunning());
 
 	/* Real work is done; log and update stats. */
@@ -8740,6 +8778,7 @@ XLogChecksums(uint32 new_type)
 	XLogRegisterData((char *) &xlrec, sizeof(xl_checksum_state));
 
 	recptr = XLogInsert(RM_XLOG2_ID, XLOG2_CHECKSUMS);
+	pg_atomic_write_u64(&XLogCtl->lastChecksumChangeRecPtr, recptr);
 	XLogFlush(recptr);
 }
 
@@ -8777,10 +8816,10 @@ UpdateFullPageWrites(void)
 
 	/*
 	 * It's always safe to take full page images, even when not strictly
-	 * required, but not the other round. So if we're setting full_page_writes
-	 * to true, first set it true and then write the WAL record. If we're
-	 * setting it to false, first write the WAL record and then set the global
-	 * flag.
+	 * required, but not the other way round. So if we're setting
+	 * full_page_writes to true, first set it true and then write the WAL
+	 * record. If we're setting it to false, first write the WAL record and
+	 * then set the global flag.
 	 */
 	if (fullPageWrites)
 	{
@@ -9241,8 +9280,12 @@ xlog2_redo(XLogReaderState *record)
 	if (info == XLOG2_CHECKSUMS)
 	{
 		xl_checksum_state state;
+		XLogRecPtr	lsn = record->EndRecPtr;
 
 		memcpy(&state, XLogRecGetData(record), sizeof(xl_checksum_state));
+
+		/* advertise the location before the new state becomes visible */
+		pg_atomic_write_u64(&XLogCtl->lastChecksumChangeRecPtr, lsn);
 
 		SpinLockAcquire(&XLogCtl->info_lck);
 		XLogCtl->data_checksum_version = state.new_checksum_state;
@@ -9250,6 +9293,31 @@ xlog2_redo(XLogReaderState *record)
 
 		LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
 		ControlFile->data_checksum_version = state.new_checksum_state;
+
+		/*
+		 * Update minRecoveryPoint to ensure that if recovery is aborted, we
+		 * recover back up to this point before allowing hot standby again.
+		 * The new state is durable in pg_control while its location is only
+		 * tracked in shared memory; a standby becoming consistent below this
+		 * record would let base backups resume checksum verification with the
+		 * location unknown.  The local copies cannot be updated as long as
+		 * crash recovery is happening and we expect all the WAL to be
+		 * replayed.
+		 */
+		if (InArchiveRecovery)
+		{
+			LocalMinRecoveryPoint = ControlFile->minRecoveryPoint;
+			LocalMinRecoveryPointTLI = ControlFile->minRecoveryPointTLI;
+		}
+		if (XLogRecPtrIsValid(LocalMinRecoveryPoint) && LocalMinRecoveryPoint < lsn)
+		{
+			TimeLineID	replayTLI;
+
+			(void) GetCurrentReplayRecPtr(&replayTLI);
+			ControlFile->minRecoveryPoint = lsn;
+			ControlFile->minRecoveryPointTLI = replayTLI;
+		}
+
 		UpdateControlFile();
 		LWLockRelease(ControlFileLock);
 
@@ -9666,7 +9734,7 @@ do_pg_backup_start(const char *backupidstr, bool fast, List **tablespaces,
 			if (de_type == PGFILETYPE_LNK)
 			{
 				StringInfoData escapedpath;
-				int			rllen;
+				ssize_t		rllen;
 
 				rllen = readlink(fullpath, linkpath, sizeof(linkpath));
 				if (rllen < 0)

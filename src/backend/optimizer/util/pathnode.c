@@ -1442,9 +1442,9 @@ create_append_path(PlannerInfo *root,
 	 * child's pathkeys if any, overriding whatever the caller might've said.
 	 * Furthermore, if the child's parallel awareness matches the Append's,
 	 * then the Append is a no-op and will be discarded later (in setrefs.c).
-	 * Then we can inherit the child's size and cost too, effectively charging
-	 * zero for the Append.  Otherwise, we must do the normal costsize
-	 * calculation.
+	 * Then we can inherit the child's size, cost and disabled-node count too,
+	 * effectively charging zero for the Append.  Otherwise, we must do the
+	 * normal costsize calculation.
 	 */
 	if (list_length(pathnode->subpaths) == 1)
 	{
@@ -1453,6 +1453,7 @@ create_append_path(PlannerInfo *root,
 		if (child->parallel_aware == parallel_aware)
 		{
 			pathnode->path.rows = child->rows;
+			pathnode->path.disabled_nodes = child->disabled_nodes;
 			pathnode->path.startup_cost = child->startup_cost;
 			pathnode->path.total_cost = child->total_cost;
 		}
@@ -1605,7 +1606,8 @@ create_merge_append_path(PlannerInfo *root,
 									  subpath->pathtarget->width,
 									  0.0,
 									  work_mem,
-									  pathnode->limit_tuples);
+									  pathnode->limit_tuples,
+									  NULL);
 			}
 			else
 			{
@@ -2883,7 +2885,8 @@ create_incremental_sort_path(PlannerInfo *root,
 						  subpath->rows,
 						  subpath->pathtarget->width,
 						  0.0,	/* XXX comparison_cost shouldn't be 0? */
-						  work_mem, limit_tuples);
+						  work_mem, limit_tuples,
+						  &sort->numGroups);
 
 	sort->nPresortedCols = presorted_keys;
 
@@ -3035,6 +3038,16 @@ create_unique_path(PlannerInfo *root,
 	pathnode->path.total_cost = subpath->total_cost +
 		cpu_operator_cost * subpath->rows * numCols;
 	pathnode->path.rows = numGroups;
+
+	/*
+	 * Mark the path as disabled if enable_groupagg is off.  While this isn't
+	 * a grouping Agg node, it is the sort-based way of removing duplicates
+	 * and so is the natural counterpart to the AGG_HASHED path that
+	 * enable_hashagg controls; it seems close enough to justify letting that
+	 * switch control it.
+	 */
+	if (!enable_groupagg)
+		pathnode->path.disabled_nodes++;
 
 	return pathnode;
 }
@@ -3522,6 +3535,16 @@ create_setop_path(PlannerInfo *root,
 		 * qual-checking or projection.
 		 */
 		pathnode->path.total_cost += cpu_operator_cost * outputRows;
+
+		/*
+		 * Mark the path as disabled if enable_groupagg is off.  While this
+		 * isn't a grouping Agg node, it is the sort-based implementation and
+		 * so is the natural counterpart to the SETOP_HASHED path that
+		 * enable_hashagg controls; it seems close enough to justify letting
+		 * that switch control it.
+		 */
+		if (!enable_groupagg)
+			pathnode->path.disabled_nodes++;
 	}
 	else
 	{

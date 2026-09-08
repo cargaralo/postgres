@@ -216,10 +216,13 @@ COPY gtest1 FROM stdin;
 \.
 
 COPY gtest1 (a, b) FROM stdin;
+\.
 
 COPY gtest1 FROM stdin WHERE b <> 10;
+\.
 
 COPY gtest1 FROM stdin WHERE gtest1 IS NULL;
+\.
 
 SELECT * FROM gtest1 ORDER BY a;
 
@@ -236,6 +239,7 @@ COPY gtest3 FROM stdin;
 \.
 
 COPY gtest3 (a, b) FROM stdin;
+\.
 
 SELECT * FROM gtest3 ORDER BY a;
 
@@ -341,6 +345,16 @@ CREATE TABLE gtest20c (a int, b int GENERATED ALWAYS AS (a * 2) STORED);
 ALTER TABLE gtest20c ADD CONSTRAINT whole_row_check CHECK (gtest20c IS NOT NULL);
 INSERT INTO gtest20c VALUES (1);  -- ok
 INSERT INTO gtest20c VALUES (NULL);  -- fails
+ALTER TABLE gtest20c ALTER COLUMN b SET EXPRESSION AS (NULL::int);  -- violates constraint
+
+-- index with whole-row reference needs rebuild
+CREATE TABLE gtest20d (a int, b int GENERATED ALWAYS AS (a * 2) STORED);
+INSERT INTO gtest20d VALUES (1), (1);
+CREATE INDEX gtest20d_idx1 ON gtest20d (a) WHERE gtest20d = ROW (1, 2);
+
+ALTER TABLE gtest20d ALTER COLUMN b SET EXPRESSION AS (a * 2::bigint);  -- index rebuild
+CREATE INDEX gtest20d_idx2 ON gtest20d ((gtest20d = ROW (1, 2)));
+ALTER TABLE gtest20d ALTER COLUMN b SET EXPRESSION AS (a * 3);  -- index rebuild
 
 -- not-null constraints
 CREATE TABLE gtest21a (a int PRIMARY KEY, b int GENERATED ALWAYS AS (nullif(a, 0)) STORED NOT NULL);
@@ -368,6 +382,25 @@ INSERT INTO gtest21b (a) VALUES (NULL);  -- error
 ALTER TABLE gtest21b ALTER COLUMN b DROP NOT NULL;
 INSERT INTO gtest21b (a) VALUES (0);  -- ok now
 
+-- virtual generated columns are not physically stored, even when not null
+--CREATE TABLE gtest21c (a int NOT NULL, b int GENERATED ALWAYS AS (a * 2) VIRTUAL NOT NULL, c int NOT NULL);
+--INSERT INTO gtest21c (a, c) VALUES (10, 42);
+--SELECT a, b, c FROM gtest21c;
+--DROP TABLE gtest21c;
+-- try adding a virtual generated column to an existing table with tuples,
+-- then try adding an atthasmissing column before adding a normal nullable
+-- column.
+--CREATE TABLE gtest21d (a int NOT NULL);
+--INSERT INTO gtest21d (a) VALUES(10);
+--ALTER TABLE gtest21d ADD COLUMN b INT GENERATED ALWAYS AS (a * 10) VIRTUAL NOT NULL;
+--SELECT * FROM gtest21d ORDER BY a;
+--INSERT INTO gtest21d (a) VALUES(20);
+--ALTER TABLE gtest21d ADD COLUMN c INT NOT NULL DEFAULT 1234;
+--SELECT * FROM gtest21d ORDER BY a;
+--ALTER TABLE gtest21d ADD COLUMN d INT;
+--INSERT INTO gtest21d (a, c, d) VALUES(30, 12345, 100);
+--SELECT * FROM gtest21d ORDER BY a;
+--DROP TABLE gtest21d;
 -- not-null constraint with partitioned table
 CREATE TABLE gtestnn_parent (
     f1 int,
@@ -647,6 +680,21 @@ ALTER TABLE ONLY gtest30 ALTER COLUMN b DROP EXPRESSION;  -- error
 \d gtest30
 \d gtest30_1
 ALTER TABLE gtest30_1 ALTER COLUMN b DROP EXPRESSION;  -- error
+BEGIN;
+CREATE TABLE gtest30_1_1 () INHERITS (gtest30_1);
+ALTER TABLE gtest30 ALTER COLUMN b DROP EXPRESSION;
+\d gtest30_1_1
+ROLLBACK;
+
+-- test drop expression with subpartitions
+CREATE TABLE gtest_root (a int, b int, c int GENERATED ALWAYS AS (a + b) STORED) PARTITION BY LIST (a);
+CREATE TABLE gtest_node PARTITION OF gtest_root FOR VALUES IN (1) PARTITION BY LIST (b);
+CREATE TABLE gtest_leaf PARTITION OF gtest_node FOR VALUES IN (1);
+ALTER TABLE gtest_node ALTER COLUMN c DROP EXPRESSION;  -- fails
+ALTER TABLE ONLY gtest_root ALTER COLUMN c DROP EXPRESSION;  -- fails
+ALTER TABLE gtest_root ALTER COLUMN c DROP EXPRESSION;
+\d gtest_(root|node|leaf)
+DROP TABLE gtest_root;
 
 -- composite type dependencies
 CREATE TABLE gtest31_1 (a int, b text GENERATED ALWAYS AS ('hello') STORED, c text);

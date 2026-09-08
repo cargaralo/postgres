@@ -56,6 +56,7 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_publication.h"
 #include "catalog/pg_rewrite.h"
+#include "catalog/pg_parameter_acl.h"
 #include "catalog/pg_shseclabel.h"
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_subscription.h"
@@ -120,6 +121,7 @@ static const FormData_pg_attribute Desc_pg_auth_members[Natts_pg_auth_members] =
 static const FormData_pg_attribute Desc_pg_index[Natts_pg_index] = {Schema_pg_index};
 static const FormData_pg_attribute Desc_pg_shseclabel[Natts_pg_shseclabel] = {Schema_pg_shseclabel};
 static const FormData_pg_attribute Desc_pg_subscription[Natts_pg_subscription] = {Schema_pg_subscription};
+static const FormData_pg_attribute Desc_pg_parameter_acl[Natts_pg_parameter_acl] = {Schema_pg_parameter_acl};
 
 /*
  *		Hash tables that index the relation cache
@@ -879,8 +881,7 @@ RelationBuildRuleLock(Relation relation)
 		if (numlocks >= maxlocks)
 		{
 			maxlocks *= 2;
-			rules = (RewriteRule **)
-				repalloc(rules, sizeof(RewriteRule *) * maxlocks);
+			rules = repalloc_array(rules, RewriteRule *, maxlocks);
 		}
 		rules[numlocks++] = rule;
 	}
@@ -977,6 +978,8 @@ equalPolicy(RowSecurityPolicy *policy1, RowSecurityPolicy *policy2)
 			return false;
 
 		if (policy1->polcmd != policy2->polcmd)
+			return false;
+		if (policy1->permissive != policy2->permissive)
 			return false;
 		if (policy1->hassublinks != policy2->hassublinks)
 			return false;
@@ -1094,8 +1097,7 @@ RelationBuildDesc(Oid targetRelId, bool insertIt)
 		int			allocsize;
 
 		allocsize = in_progress_list_maxlen * 2;
-		in_progress_list = repalloc(in_progress_list,
-									allocsize * sizeof(*in_progress_list));
+		in_progress_list = repalloc_array(in_progress_list, InProgressEnt, allocsize);
 		in_progress_list_maxlen = allocsize;
 	}
 	in_progress_offset = in_progress_list_len++;
@@ -2756,7 +2758,7 @@ RelationRebuildRelation(Relation relation)
 		/* toast OID override must be preserved */
 		SWAPFIELD(Oid, rd_toastoid);
 		/* pgstat_info / enabled must be preserved */
-		SWAPFIELD(struct PgStat_TableStatus *, pgstat_info);
+		SWAPFIELD(struct PgStat_RelationStatus *, pgstat_info);
 		SWAPFIELD(bool, pgstat_enabled);
 		/* preserve old partition key if we have one */
 		if (keep_partkey)
@@ -3109,7 +3111,7 @@ RememberToFreeTupleDescAtEOX(TupleDesc td)
 
 		oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 
-		EOXactTupleDescArray = (TupleDesc *) palloc(16 * sizeof(TupleDesc));
+		EOXactTupleDescArray = palloc_array(TupleDesc, 16);
 		EOXactTupleDescArrayLen = 16;
 		NextEOXactTupleDescNum = 0;
 		MemoryContextSwitchTo(oldcxt);
@@ -3120,8 +3122,7 @@ RememberToFreeTupleDescAtEOX(TupleDesc td)
 
 		Assert(EOXactTupleDescArrayLen > 0);
 
-		EOXactTupleDescArray = (TupleDesc *) repalloc(EOXactTupleDescArray,
-													  newlen * sizeof(TupleDesc));
+		EOXactTupleDescArray = repalloc_array(EOXactTupleDescArray, TupleDesc, newlen);
 		EOXactTupleDescArrayLen = newlen;
 	}
 
@@ -3171,7 +3172,7 @@ AssertPendingSyncs_RelationCache(void)
 	 */
 	PushActiveSnapshot(GetTransactionSnapshot());
 	maxrels = 1;
-	rels = palloc(maxrels * sizeof(*rels));
+	rels = palloc_array(Relation, maxrels);
 	nrels = 0;
 	hash_seq_init(&status, GetLockMethodLocalHash());
 	while ((locallock = (LOCALLOCK *) hash_seq_search(&status)) != NULL)
@@ -3191,7 +3192,7 @@ AssertPendingSyncs_RelationCache(void)
 		if (nrels >= maxrels)
 		{
 			maxrels *= 2;
-			rels = repalloc(rels, maxrels * sizeof(*rels));
+			rels = repalloc_array(rels, Relation, maxrels);
 		}
 		rels[nrels++] = r;
 	}
@@ -4084,8 +4085,10 @@ RelationCacheInitializePhase2(void)
 				  Natts_pg_shseclabel, Desc_pg_shseclabel);
 		formrdesc("pg_subscription", SubscriptionRelation_Rowtype_Id, true,
 				  Natts_pg_subscription, Desc_pg_subscription);
+		formrdesc("pg_parameter_acl", ParameterAclRelation_Rowtype_Id, true,
+				  Natts_pg_parameter_acl, Desc_pg_parameter_acl);
 
-#define NUM_CRITICAL_SHARED_RELS	5	/* fix if you change list above */
+#define NUM_CRITICAL_SHARED_RELS	6	/* fix if you change list above */
 	}
 
 	MemoryContextSwitchTo(oldcxt);
@@ -4206,9 +4209,10 @@ RelationCacheInitializePhase3(void)
 	 * non-shared catalogs at all.  Autovacuum calls InitPostgres with a
 	 * database OID, so it instead depends on DatabaseOidIndexId.  We also
 	 * need to nail up some indexes on pg_authid and pg_auth_members for use
-	 * during client authentication.  SharedSecLabelObjectIndexId isn't
-	 * critical for the core system, but authentication hooks might be
-	 * interested in it.
+	 * during client authentication.  We need indexes on pg_parameter_acl for
+	 * ACL checks on settings specified in the startup packet for a physical
+	 * replication connection.  SharedSecLabelObjectIndexId isn't critical for
+	 * the core system, but authentication hooks might be interested in it.
 	 */
 	if (!criticalSharedRelcachesBuilt)
 	{
@@ -4224,8 +4228,12 @@ RelationCacheInitializePhase3(void)
 							AuthMemRelationId);
 		load_critical_index(SharedSecLabelObjectIndexId,
 							SharedSecLabelRelationId);
+		load_critical_index(ParameterAclParnameIndexId,
+							ParameterAclRelationId);
+		load_critical_index(ParameterAclOidIndexId,
+							ParameterAclRelationId);
 
-#define NUM_CRITICAL_SHARED_INDEXES 6	/* fix if you change list above */
+#define NUM_CRITICAL_SHARED_INDEXES 8	/* fix if you change list above */
 
 		criticalSharedRelcachesBuilt = true;
 	}
@@ -6218,7 +6226,7 @@ load_relcache_init_file(bool shared)
 	 * helps to guard against broken init files.
 	 */
 	max_rels = 100;
-	rels = (Relation *) palloc(max_rels * sizeof(Relation));
+	rels = palloc_array(Relation, max_rels);
 	num_rels = 0;
 	nailed_rels = nailed_indexes = 0;
 
@@ -6253,7 +6261,7 @@ load_relcache_init_file(bool shared)
 		if (num_rels >= max_rels)
 		{
 			max_rels *= 2;
-			rels = (Relation *) repalloc(rels, max_rels * sizeof(Relation));
+			rels = repalloc_array(rels, Relation, max_rels);
 		}
 
 		rel = rels[num_rels++] = (Relation) palloc(len);

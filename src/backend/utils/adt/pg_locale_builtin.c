@@ -15,10 +15,21 @@
 #include "catalog/pg_collation.h"
 #include "common/unicode_case.h"
 #include "common/unicode_category.h"
+#include "common/unicode_limits.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
+#include "utils/memutils.h"
 #include "utils/pg_locale.h"
 #include "utils/syscache.h"
+
+/*
+ * The largest text value must fit in MaxAllocSize, but then may grow during
+ * case mapping. While the resulting string will not be representable as a new
+ * text value, we must at least be sure not to overflow a size_t while
+ * processing it.
+ */
+StaticAssertDecl(SIZE_MAX / UTF8_MAX_CASEMAP_EXPANSION > MaxAllocSize,
+				 "case mapping may overflow size_t");
 
 extern pg_locale_t create_pg_locale_builtin(Oid collid,
 											MemoryContext context);
@@ -62,21 +73,33 @@ initcap_wbnext(void *state)
 
 	while (wbstate->offset < wbstate->len)
 	{
-		char32_t	u = utf8_to_unicode((const unsigned char *) wbstate->str +
+		int			ulen = pg_utf_mblen((const unsigned char *) wbstate->str +
 										wbstate->offset);
-		bool		curr_alnum = pg_u_isalnum(u, wbstate->posix);
+		char32_t	u;
+		bool		curr_alnum;
+		size_t		prev_offset = wbstate->offset;
+
+		/* invalid UTF8 */
+		if (wbstate->offset + ulen > wbstate->len)
+		{
+			wbstate->init = true;
+			wbstate->offset = wbstate->len;
+			return prev_offset;
+		}
+
+		u = utf8_to_unicode((const unsigned char *) wbstate->str +
+							wbstate->offset);
+		curr_alnum = pg_u_isalnum(u, wbstate->posix);
 
 		if (!wbstate->init || curr_alnum != wbstate->prev_alnum)
 		{
-			size_t		prev_offset = wbstate->offset;
-
 			wbstate->init = true;
-			wbstate->offset += unicode_utf8len(u);
+			wbstate->offset += ulen;
 			wbstate->prev_alnum = curr_alnum;
 			return prev_offset;
 		}
 
-		wbstate->offset += unicode_utf8len(u);
+		wbstate->offset += ulen;
 	}
 
 	return wbstate->len;
@@ -86,8 +109,16 @@ static size_t
 strlower_builtin(char *dest, size_t destsize, const char *src, size_t srclen,
 				 pg_locale_t locale)
 {
-	return unicode_strlower(dest, destsize, src, srclen,
-							locale->builtin.casemap_full);
+	size_t		consumed;
+	size_t		result;
+
+	result = unicode_strlower(dest, destsize, src, srclen, &consumed,
+							  locale->builtin.casemap_full);
+	if (consumed < srclen)
+		report_invalid_encoding(GetDatabaseEncoding(), src + consumed,
+								srclen - consumed);
+
+	return result;
 }
 
 static size_t
@@ -102,26 +133,50 @@ strtitle_builtin(char *dest, size_t destsize, const char *src, size_t srclen,
 		.init = false,
 		.prev_alnum = false,
 	};
+	size_t		consumed;
+	size_t		result;
 
-	return unicode_strtitle(dest, destsize, src, srclen,
-							locale->builtin.casemap_full,
-							initcap_wbnext, &wbstate);
+	result = unicode_strtitle(dest, destsize, src, srclen, &consumed,
+							  locale->builtin.casemap_full,
+							  initcap_wbnext, &wbstate);
+
+	if (consumed < srclen)
+		report_invalid_encoding(GetDatabaseEncoding(), src + consumed,
+								srclen - consumed);
+
+	return result;
 }
 
 static size_t
 strupper_builtin(char *dest, size_t destsize, const char *src, size_t srclen,
 				 pg_locale_t locale)
 {
-	return unicode_strupper(dest, destsize, src, srclen,
-							locale->builtin.casemap_full);
+	size_t		consumed;
+	size_t		result;
+
+	result = unicode_strupper(dest, destsize, src, srclen, &consumed,
+							  locale->builtin.casemap_full);
+	if (consumed < srclen)
+		report_invalid_encoding(GetDatabaseEncoding(), src + consumed,
+								srclen - consumed);
+
+	return result;
 }
 
 static size_t
 strfold_builtin(char *dest, size_t destsize, const char *src, size_t srclen,
 				pg_locale_t locale)
 {
-	return unicode_strfold(dest, destsize, src, srclen,
-						   locale->builtin.casemap_full);
+	size_t		consumed;
+	size_t		result;
+
+	result = unicode_strfold(dest, destsize, src, srclen, &consumed,
+							 locale->builtin.casemap_full);
+	if (consumed < srclen)
+		report_invalid_encoding(GetDatabaseEncoding(), src + consumed,
+								srclen - consumed);
+
+	return result;
 }
 
 static bool
@@ -276,8 +331,8 @@ char *
 get_collation_actual_version_builtin(const char *collcollate)
 {
 	/*
-	 * The only two supported locales (C and C.UTF-8) are both based on memcmp
-	 * and are not expected to change, but track the version anyway.
+	 * The supported locales (C, C.UTF-8, and PG_UNICODE_FAST) are all based
+	 * on memcmp and are not expected to change, but track the version anyway.
 	 *
 	 * Note that the character semantics may change for some locales, but the
 	 * collation version only tracks changes to sort order.

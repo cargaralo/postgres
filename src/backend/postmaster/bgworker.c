@@ -1365,9 +1365,7 @@ LookupBackgroundWorkerFunction(const char *libraryname, const char *funcname)
 	 */
 	if (strcmp(libraryname, "postgres") == 0)
 	{
-		int			i;
-
-		for (i = 0; i < lengthof(InternalBGWorkers); i++)
+		for (size_t i = 0; i < lengthof(InternalBGWorkers); i++)
 		{
 			if (strcmp(InternalBGWorkers[i].fn_name, funcname) == 0)
 				return InternalBGWorkers[i].fn_addr;
@@ -1444,16 +1442,20 @@ TerminateBackgroundWorkersForDatabase(Oid databaseId)
 		if (slot->in_use &&
 			(slot->worker.bgw_flags & BGWORKER_INTERRUPTIBLE))
 		{
-			PGPROC	   *proc = BackendPidGetProc(slot->pid);
+			PGPROC	   *proc;
+			pid_t		pid = slot->pid;
 
+			LWLockAcquire(ProcArrayLock, LW_SHARED);
+			proc = BackendPidGetProcWithLock(pid);
 			if (proc && proc->databaseId == databaseId)
 			{
 				slot->terminate = true;
 				signal_postmaster = true;
 
 				elog(DEBUG1, "termination requested for worker (PID %d) on database %u",
-					 (int) slot->pid, databaseId);
+					 (int) pid, databaseId);
 			}
+			LWLockRelease(ProcArrayLock);
 		}
 	}
 

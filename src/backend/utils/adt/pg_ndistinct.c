@@ -177,7 +177,7 @@ ndistinct_object_end(void *state)
 	/* Create the MVNDistinctItem */
 	item = palloc_object(MVNDistinctItem);
 	item->nattributes = natts;
-	item->attributes = palloc0(natts * sizeof(AttrNumber));
+	item->attributes = palloc0_array(AttrNumber, natts);
 	item->ndistinct = (double) parse->ndistinct;
 
 	for (int i = 0; i < natts; i++)
@@ -793,13 +793,12 @@ pg_ndistinct_out(PG_FUNCTION_ARGS)
 {
 	bytea	   *data = PG_GETARG_BYTEA_PP(0);
 	MVNDistinct *ndist = statext_ndistinct_deserialize(data);
-	int			i;
 	StringInfoData str;
 
 	initStringInfo(&str);
 	appendStringInfoChar(&str, '[');
 
-	for (i = 0; i < ndist->nitems; i++)
+	for (uint32 i = 0; i < ndist->nitems; i++)
 	{
 		MVNDistinctItem item = ndist->items[i];
 

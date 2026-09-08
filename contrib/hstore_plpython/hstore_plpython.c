@@ -19,9 +19,9 @@ static PLyUnicode_FromStringAndSize_t PLyUnicode_FromStringAndSize_p;
 /* Linkage to functions in hstore module */
 typedef HStore *(*hstoreUpgrade_t) (Datum orig);
 static hstoreUpgrade_t hstoreUpgrade_p;
-typedef int (*hstoreUniquePairs_t) (Pairs *a, int32 l, int32 *buflen);
+typedef int (*hstoreUniquePairs_t) (Pairs *a, int32 l, Size *buflen);
 static hstoreUniquePairs_t hstoreUniquePairs_p;
-typedef HStore *(*hstorePairs_t) (Pairs *pairs, int32 pcount, int32 buflen);
+typedef HStore *(*hstorePairs_t) (Pairs *pairs, int32 pcount, Size buflen);
 static hstorePairs_t hstorePairs_p;
 typedef size_t (*hstoreCheckKeyLen_t) (size_t len);
 static hstoreCheckKeyLen_t hstoreCheckKeyLen_p;
@@ -143,11 +143,20 @@ plpython_to_hstore(PG_FUNCTION_ARGS)
 				 errmsg("not a Python mapping")));
 
 	pcount = PyMapping_Size(dict);
+	if (pcount < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("could not get size of Python mapping")));
+
 	items = PyMapping_Items(dict);
+	if (items == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("could not get items from Python mapping")));
 
 	PG_TRY();
 	{
-		int32		buflen;
+		Size		buflen;
 		Py_ssize_t	i;
 		Pairs	   *pairs;
 
@@ -160,6 +169,13 @@ plpython_to_hstore(PG_FUNCTION_ARGS)
 			PyObject   *value;
 
 			tuple = PyList_GetItem(items, i);
+
+			/* The mapping's items() must yield key/value pairs */
+			if (tuple == NULL || !PyTuple_Check(tuple) || PyTuple_Size(tuple) < 2)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATATYPE_MISMATCH),
+						 errmsg("items() of a Python mapping must return key/value pairs")));
+
 			key = PyTuple_GetItem(tuple, 0);
 			value = PyTuple_GetItem(tuple, 1);
 

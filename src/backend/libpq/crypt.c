@@ -137,7 +137,7 @@ get_role_password(const char *role, const char **logdetail)
 				detail = psprintf(_("The password for role \"%s\" will expire in less than 1 minute."),
 								  role);
 
-			StoreConnectionWarning(warning, detail);
+			StoreConnectionWarning(warning, detail, NULL);
 
 			MemoryContextSwitchTo(oldcontext);
 		}
@@ -295,24 +295,7 @@ md5_crypt_verify(const char *role, const char *shadow_pass,
 
 	if (strlen(client_pass) == strlen(crypt_pwd) &&
 		timingsafe_bcmp(client_pass, crypt_pwd, strlen(crypt_pwd)) == 0)
-	{
 		retval = STATUS_OK;
-
-		if (md5_password_warnings)
-		{
-			MemoryContext oldcontext;
-			char	   *warning;
-			char	   *detail;
-
-			oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-
-			warning = pstrdup(_("authenticated with an MD5-encrypted password"));
-			detail = pstrdup(_("MD5 password support is deprecated and will be removed in a future release of PostgreSQL."));
-			StoreConnectionWarning(warning, detail);
-
-			MemoryContextSwitchTo(oldcontext);
-		}
-	}
 	else
 	{
 		*logdetail = psprintf(_("Password does not match for user \"%s\"."),

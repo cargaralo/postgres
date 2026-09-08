@@ -476,7 +476,7 @@ static void dump_var(const char *str, NumericVar *var);
 #endif
 
 #define digitbuf_alloc(ndigits)  \
-	((NumericDigit *) palloc((ndigits) * sizeof(NumericDigit)))
+	(palloc_array(NumericDigit, (ndigits)))
 #define digitbuf_free(buf)	\
 	do { \
 		 if ((buf) != NULL) \
@@ -1305,6 +1305,29 @@ numeric		(PG_FUNCTION_ARGS)
 	PG_RETURN_NUMERIC(new);
 }
 
+/*
+ * make_numeric_typmod_safe() -
+ *
+ *	Validate a numeric precision/scale and pack them into a typmod value,
+ *	with soft error handling.
+ */
+int32
+make_numeric_typmod_safe(int32 precision, int32 scale, Node *escontext)
+{
+	if (precision < 1 || precision > NUMERIC_MAX_PRECISION)
+		ereturn(escontext, -1,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("NUMERIC precision %d must be between 1 and %d",
+						precision, NUMERIC_MAX_PRECISION)));
+	if (scale < NUMERIC_MIN_SCALE || scale > NUMERIC_MAX_SCALE)
+		ereturn(escontext, -1,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("NUMERIC scale %d must be between %d and %d",
+						scale, NUMERIC_MIN_SCALE, NUMERIC_MAX_SCALE)));
+
+	return make_numeric_typmod(precision, scale);
+}
+
 Datum
 numerictypmodin(PG_FUNCTION_ARGS)
 {
@@ -1316,28 +1339,11 @@ numerictypmodin(PG_FUNCTION_ARGS)
 	tl = ArrayGetIntegerTypmods(ta, &n);
 
 	if (n == 2)
-	{
-		if (tl[0] < 1 || tl[0] > NUMERIC_MAX_PRECISION)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("NUMERIC precision %d must be between 1 and %d",
-							tl[0], NUMERIC_MAX_PRECISION)));
-		if (tl[1] < NUMERIC_MIN_SCALE || tl[1] > NUMERIC_MAX_SCALE)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("NUMERIC scale %d must be between %d and %d",
-							tl[1], NUMERIC_MIN_SCALE, NUMERIC_MAX_SCALE)));
-		typmod = make_numeric_typmod(tl[0], tl[1]);
-	}
+		typmod = make_numeric_typmod_safe(tl[0], tl[1], NULL);
 	else if (n == 1)
 	{
-		if (tl[0] < 1 || tl[0] > NUMERIC_MAX_PRECISION)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("NUMERIC precision %d must be between 1 and %d",
-							tl[0], NUMERIC_MAX_PRECISION)));
 		/* scale defaults to zero */
-		typmod = make_numeric_typmod(tl[0], 0);
+		typmod = make_numeric_typmod_safe(tl[0], 0, NULL);
 	}
 	else
 	{
@@ -5009,7 +5015,15 @@ numeric_combine(PG_FUNCTION_ARGS)
 	state2 = PG_ARGISNULL(1) ? NULL : (NumericAggState *) PG_GETARG_POINTER(1);
 
 	if (state2 == NULL)
+	{
+		/*
+		 * NULL state2 is easy, just return state1, which we know is already
+		 * in the agg_context
+		 */
+		if (state1 == NULL)
+			PG_RETURN_NULL();
 		PG_RETURN_POINTER(state1);
+	}
 
 	/* manually copy all fields from state2 to state1 */
 	if (state1 == NULL)
@@ -5101,7 +5115,15 @@ numeric_avg_combine(PG_FUNCTION_ARGS)
 	state2 = PG_ARGISNULL(1) ? NULL : (NumericAggState *) PG_GETARG_POINTER(1);
 
 	if (state2 == NULL)
+	{
+		/*
+		 * NULL state2 is easy, just return state1, which we know is already
+		 * in the agg_context
+		 */
+		if (state1 == NULL)
+			PG_RETURN_NULL();
 		PG_RETURN_POINTER(state1);
+	}
 
 	/* manually copy all fields from state2 to state1 */
 	if (state1 == NULL)
@@ -5565,7 +5587,15 @@ numeric_poly_combine(PG_FUNCTION_ARGS)
 	state2 = PG_ARGISNULL(1) ? NULL : (Int128AggState *) PG_GETARG_POINTER(1);
 
 	if (state2 == NULL)
+	{
+		/*
+		 * NULL state2 is easy, just return state1, which we know is already
+		 * in the agg_context
+		 */
+		if (state1 == NULL)
+			PG_RETURN_NULL();
 		PG_RETURN_POINTER(state1);
+	}
 
 	/* manually copy all fields from state2 to state1 */
 	if (state1 == NULL)
@@ -5726,7 +5756,15 @@ int8_avg_combine(PG_FUNCTION_ARGS)
 	state2 = PG_ARGISNULL(1) ? NULL : (Int128AggState *) PG_GETARG_POINTER(1);
 
 	if (state2 == NULL)
+	{
+		/*
+		 * NULL state2 is easy, just return state1, which we know is already
+		 * in the agg_context
+		 */
+		if (state1 == NULL)
+			PG_RETURN_NULL();
 		PG_RETURN_POINTER(state1);
+	}
 
 	/* manually copy all fields from state2 to state1 */
 	if (state1 == NULL)
@@ -7832,9 +7870,8 @@ numericvar_to_int64(const NumericVar *var, int64 *result)
 
 	if (!neg)
 	{
-		if (unlikely(val == PG_INT64_MIN))
+		if (unlikely(pg_neg_s64_overflow(val, &val)))
 			return false;
-		val = -val;
 	}
 	*result = val;
 
@@ -12046,8 +12083,8 @@ accum_sum_rescale(NumericSumAccum *accum, const NumericVar *val)
 
 		weightdiff = accum_weight - old_weight;
 
-		new_pos_digits = palloc0(accum_ndigits * sizeof(int32));
-		new_neg_digits = palloc0(accum_ndigits * sizeof(int32));
+		new_pos_digits = palloc0_array(int32, accum_ndigits);
+		new_neg_digits = palloc0_array(int32, accum_ndigits);
 
 		if (accum->pos_digits)
 		{
@@ -12135,8 +12172,8 @@ accum_sum_final(NumericSumAccum *accum, NumericVar *result)
 static void
 accum_sum_copy(NumericSumAccum *dst, NumericSumAccum *src)
 {
-	dst->pos_digits = palloc(src->ndigits * sizeof(int32));
-	dst->neg_digits = palloc(src->ndigits * sizeof(int32));
+	dst->pos_digits = palloc_array(int32, src->ndigits);
+	dst->neg_digits = palloc_array(int32, src->ndigits);
 
 	memcpy(dst->pos_digits, src->pos_digits, src->ndigits * sizeof(int32));
 	memcpy(dst->neg_digits, src->neg_digits, src->ndigits * sizeof(int32));

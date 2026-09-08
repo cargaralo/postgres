@@ -139,21 +139,24 @@
 static Buffer vm_readbuf(Relation rel, BlockNumber blkno, bool extend);
 static Buffer vm_extend(Relation rel, BlockNumber vm_nblocks);
 
-
 /*
  *	visibilitymap_clear - clear specified bits for one page in visibility map
  *
- * You must pass a buffer containing the correct map page to this function.
- * Call visibilitymap_pin first to pin the right one. This function doesn't do
- * any I/O.  Returns true if any bits have been cleared and false otherwise.
+ * You must pass a buffer containing the correct map page to this function,
+ * which already needs to be pinned and locked exclusively.
+ *
+ * This function doesn't do any I/O. Returns true if any bits have been
+ * cleared and false otherwise.
  */
 bool
-visibilitymap_clear(Relation rel, BlockNumber heapBlk, Buffer vmbuf, uint8 flags)
+visibilitymap_clear(RelFileLocator rlocator, BlockNumber heapBlk,
+					Buffer vmbuf, uint8 flags)
 {
-	BlockNumber mapBlock = HEAPBLK_TO_MAPBLOCK(heapBlk);
 	int			mapByte = HEAPBLK_TO_MAPBYTE(heapBlk);
 	int			mapOffset = HEAPBLK_TO_OFFSET(heapBlk);
+	BlockNumber mapBlock = HEAPBLK_TO_MAPBLOCK(heapBlk);
 	uint8		mask = flags << mapOffset;
+	Page		page;
 	char	   *map;
 	bool		cleared = false;
 
@@ -162,14 +165,18 @@ visibilitymap_clear(Relation rel, BlockNumber heapBlk, Buffer vmbuf, uint8 flags
 	Assert(flags != VISIBILITYMAP_ALL_VISIBLE);
 
 #ifdef TRACE_VISIBILITYMAP
-	elog(DEBUG1, "vm_clear %s %d", RelationGetRelationName(rel), heapBlk);
+	elog(DEBUG1, "vm_clear %s %d",
+		 relpathbackend(rlocator, MyProcNumber, MAIN_FORKNUM).str,
+		 heapBlk);
 #endif
 
 	if (!BufferIsValid(vmbuf) || BufferGetBlockNumber(vmbuf) != mapBlock)
 		elog(ERROR, "wrong buffer passed to visibilitymap_clear");
 
-	LockBuffer(vmbuf, BUFFER_LOCK_EXCLUSIVE);
-	map = PageGetContents(BufferGetPage(vmbuf));
+	Assert(BufferIsLockedByMeInMode(vmbuf, BUFFER_LOCK_EXCLUSIVE));
+
+	page = BufferGetPage(vmbuf);
+	map = PageGetContents(page);
 
 	if (map[mapByte] & mask)
 	{
@@ -178,8 +185,6 @@ visibilitymap_clear(Relation rel, BlockNumber heapBlk, Buffer vmbuf, uint8 flags
 		MarkBufferDirty(vmbuf);
 		cleared = true;
 	}
-
-	LockBuffer(vmbuf, BUFFER_LOCK_UNLOCK);
 
 	return cleared;
 }
@@ -254,7 +259,7 @@ visibilitymap_pin_ok(BlockNumber heapBlk, Buffer vmbuf)
 void
 visibilitymap_set(BlockNumber heapBlk,
 				  Buffer vmBuf, uint8 flags,
-				  const RelFileLocator rlocator)
+				  RelFileLocator rlocator)
 {
 	BlockNumber mapBlock = HEAPBLK_TO_MAPBLOCK(heapBlk);
 	uint32		mapByte = HEAPBLK_TO_MAPBYTE(heapBlk);
@@ -313,7 +318,32 @@ visibilitymap_set(BlockNumber heapBlk,
  * since we don't lock the visibility map page either, it's even possible that
  * someone else could have changed the bit just before we look at it, but yet
  * we might see the old value.  It is the caller's responsibility to deal with
- * all concurrency issues!
+ * all concurrency issues!  In practice it can't be stale enough to matter for
+ * the primary use case: index-only scans that check whether a heap fetch can
+ * be skipped.
+ *
+ * The argument for why it can't be stale enough to matter for the primary use
+ * case is as follows:
+ *
+ * Inserts: we need to detect that a VM bit was cleared by an insert right
+ * away, because the new tuple is present in the index but not yet visible.
+ * Reading the TID from the index page (under a shared lock on the index
+ * buffer) is serialized with the insertion of the TID into the index (under
+ * an exclusive lock on the same index buffer).  Because the VM bit is cleared
+ * before the index is updated, and locking/unlocking of the index page acts
+ * as a full memory barrier, we are sure to see the cleared bit whenever we
+ * see a recently-inserted TID.
+ *
+ * Deletes: the clearing of the VM bit by a delete is NOT serialized with the
+ * index page access, because deletes do not update the index page (only
+ * VACUUM removes the index TID).  So we may see a significantly stale value.
+ * However, we don't need to detect the delete right away, because the tuple
+ * remains visible until the deleting transaction commits or the statement
+ * ends (if it's our own transaction).  In either case, the lock on the VM
+ * buffer will have been released (acting as a write barrier) after clearing
+ * the bit.  And for us to have a snapshot that includes the deleting
+ * transaction (making the tuple invisible), we must have acquired
+ * ProcArrayLock after that time, acting as a read barrier.
  */
 uint8
 visibilitymap_get_status(Relation rel, BlockNumber heapBlk, Buffer *vmbuf)

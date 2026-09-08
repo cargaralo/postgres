@@ -509,7 +509,7 @@ bt_page_print_tuples(ua_page_items *uargs)
 	memset(nulls, 0, sizeof(nulls));
 	values[j++] = Int16GetDatum(offset);
 	values[j++] = ItemPointerGetDatum(&itup->t_tid);
-	values[j++] = Int32GetDatum((int) IndexTupleSize(itup));
+	values[j++] = Int16GetDatum(IndexTupleSize(itup));
 	values[j++] = BoolGetDatum(IndexTupleHasNulls(itup));
 	values[j++] = BoolGetDatum(IndexTupleHasVarwidths(itup));
 
@@ -597,7 +597,7 @@ bt_page_print_tuples(ua_page_items *uargs)
 
 		tids = BTreeTupleGetPosting(itup);
 		nposting = BTreeTupleGetNPosting(itup);
-		tids_datum = (Datum *) palloc(nposting * sizeof(Datum));
+		tids_datum = palloc_array(Datum, nposting);
 		for (int i = 0; i < nposting; i++)
 			tids_datum[i] = ItemPointerGetDatum(&tids[i]);
 		values[j++] = PointerGetDatum(construct_array_builtin(tids_datum, nposting, TIDOID));

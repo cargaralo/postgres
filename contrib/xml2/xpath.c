@@ -188,16 +188,31 @@ pgxmlNodeSetToText(xmlNodeSetPtr nodeset,
 				}
 				else
 				{
+					xmlNodePtr	node = nodeset->nodeTab[i];
+
 					if ((septagname != NULL) && (xmlStrlen(septagname) > 0))
 					{
 						xmlBufferWriteChar(buf, "<");
 						xmlBufferWriteCHAR(buf, septagname);
 						xmlBufferWriteChar(buf, ">");
 					}
-					xmlNodeDump(buf,
-								nodeset->nodeTab[i]->doc,
-								nodeset->nodeTab[i],
-								1, 0);
+
+					/*
+					 * XML_NAMESPACE_DECL nodes are xmlNs structs, that cannot
+					 * be processed by xmlNodeDump().
+					 */
+					if (node->type == XML_NAMESPACE_DECL)
+					{
+						str = xmlXPathCastNodeToString(node);
+						if (str == NULL || pg_xml_error_occurred(xmlerrcxt))
+							xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
+										"could not allocate node text");
+						xmlBufferWriteCHAR(buf, str);
+						xmlFree(str);
+						str = NULL;
+					}
+					else
+						xmlNodeDump(buf, node->doc, node, 1, 0);
 
 					if ((septagname != NULL) && (xmlStrlen(septagname) > 0))
 					{
@@ -685,8 +700,8 @@ xpath_table(PG_FUNCTION_ARGS)
 
 	attinmeta = TupleDescGetAttInMetadata(rsinfo->setDesc);
 
-	values = (char **) palloc0(rsinfo->setDesc->natts * sizeof(char *));
-	xpaths = (xmlChar **) palloc(rsinfo->setDesc->natts * sizeof(xmlChar *));
+	values = palloc0_array(char *, rsinfo->setDesc->natts);
+	xpaths = palloc_array(xmlChar *, rsinfo->setDesc->natts);
 
 	/*
 	 * Split XPaths. xpathset is a writable CString.

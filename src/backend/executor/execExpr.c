@@ -142,26 +142,6 @@ static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 ExprState *
 ExecInitExpr(Expr *node, PlanState *parent)
 {
-	return ExecInitExprWithContext(node, parent, NULL);
-}
-
-/*
- * ExecInitExprWithContext: same as ExecInitExpr, but with an optional
- * ErrorSaveContext for soft error handling.
- *
- * When 'escontext' is non-NULL, expression nodes that support soft errors
- * (currently CoerceToDomain's NOT NULL and CHECK constraint steps) will use
- * errsave() instead of ereport(), allowing the caller to detect and handle
- * failures without a transaction abort.
- *
- * The escontext must be provided at initialization time (not after), because
- * it is copied into per-step data during expression compilation.
- *
- * Not all expression node types support soft errors.  If in doubt, pass NULL.
- */
-ExprState *
-ExecInitExprWithContext(Expr *node, PlanState *parent, Node *escontext)
-{
 	ExprState  *state;
 	ExprEvalStep scratch = {0};
 
@@ -174,7 +154,6 @@ ExecInitExprWithContext(Expr *node, PlanState *parent, Node *escontext)
 	state->expr = node;
 	state->parent = parent;
 	state->ext_params = NULL;
-	state->escontext = (ErrorSaveContext *) escontext;
 
 	/* Insert setup steps as needed */
 	ExecCreateExprSetupSteps(state, (Node *) node);
@@ -785,18 +764,6 @@ ExecBuildUpdateProjection(List *targetList,
 ExprState *
 ExecPrepareExpr(Expr *node, EState *estate)
 {
-	return ExecPrepareExprWithContext(node, estate, NULL);
-}
-
-/*
- * ExecPrepareExprWithContext: same as ExecPrepareExpr, but with an optional
- * ErrorSaveContext for soft error handling.
- *
- * See ExecInitExprWithContext for details on the escontext parameter.
- */
-ExprState *
-ExecPrepareExprWithContext(Expr *node, EState *estate, Node *escontext)
-{
 	ExprState  *result;
 	MemoryContext oldcontext;
 
@@ -804,7 +771,7 @@ ExecPrepareExprWithContext(Expr *node, EState *estate, Node *escontext)
 
 	node = expression_planner(node);
 
-	result = ExecInitExprWithContext(node, NULL, escontext);
+	result = ExecInitExpr(node, NULL);
 
 	MemoryContextSwitchTo(oldcontext);
 
@@ -1778,7 +1745,7 @@ ExecInitExprRec(Expr *node, ExprState *state,
 				ExprEvalRowtypeCache *rowcachep;
 
 				/* cache structs must be out-of-line for space reasons */
-				rowcachep = palloc(2 * sizeof(ExprEvalRowtypeCache));
+				rowcachep = palloc_array(ExprEvalRowtypeCache, 2);
 				rowcachep[0].cacheptr = NULL;
 				rowcachep[1].cacheptr = NULL;
 
@@ -2711,8 +2678,7 @@ ExprEvalPushStep(ExprState *es, const ExprEvalStep *s)
 	else if (es->steps_alloc == es->steps_len)
 	{
 		es->steps_alloc *= 2;
-		es->steps = repalloc(es->steps,
-							 sizeof(ExprEvalStep) * es->steps_alloc);
+		es->steps = repalloc_array(es->steps, ExprEvalStep, es->steps_alloc);
 	}
 
 	memcpy(&es->steps[es->steps_len++], s, sizeof(ExprEvalStep));

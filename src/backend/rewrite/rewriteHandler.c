@@ -36,7 +36,6 @@
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteDefine.h"
-#include "rewrite/rewriteGraphTable.h"
 #include "rewrite/rewriteHandler.h"
 #include "rewrite/rewriteManip.h"
 #include "rewrite/rewriteSearchCycle.h"
@@ -173,7 +172,6 @@ AcquireRewriteLocks(Query *parsetree,
 		switch (rte->rtekind)
 		{
 			case RTE_RELATION:
-			case RTE_GRAPH_TABLE:
 
 				/*
 				 * Grab the appropriate lock type for the relation, and do not
@@ -848,7 +846,7 @@ rewriteTargetListIU(List *targetList,
 	 * scan, then appended to the reconstructed tlist.
 	 */
 	numattrs = RelationGetNumberOfAttributes(target_relation);
-	new_tles = (TargetEntry **) palloc0(numattrs * sizeof(TargetEntry *));
+	new_tles = palloc0_array(TargetEntry *, numattrs);
 	next_junk_attrno = numattrs + 1;
 
 	foreach(temp, targetList)
@@ -1492,7 +1490,7 @@ rewriteValuesRTE(Query *parsetree, RangeTblEntry *rte, int rti,
 	 * columns), and we complain if such a thing does occur.
 	 */
 	numattrs = list_length(linitial(rte->values_lists));
-	attrnos = (int *) palloc0(numattrs * sizeof(int));
+	attrnos = palloc0_array(int, numattrs);
 
 	foreach(lc, parsetree->targetList)
 	{
@@ -2079,16 +2077,6 @@ fireRIRrules(Query *parsetree, List *activeRIRs)
 		++rt_index;
 
 		rte = rt_fetch(rt_index, parsetree->rtable);
-
-		/*
-		 * Convert GRAPH_TABLE clause into a subquery using relational
-		 * operators.  (This will change the rtekind to subquery, so it must
-		 * be done before the subquery handling below.)
-		 */
-		if (rte->rtekind == RTE_GRAPH_TABLE)
-		{
-			parsetree = rewriteGraphTable(parsetree, rt_index);
-		}
 
 		/*
 		 * A subquery RTE can't have associated rules, so there's nothing to
@@ -3953,8 +3941,14 @@ rewriteTargetView(Query *parsetree, Relation view)
 	 * the WITH CHECK OPTION, or any parent view specified WITH CASCADED CHECK
 	 * OPTION, add the quals from the view to the query's withCheckOptions
 	 * list.
+	 *
+	 * DELETE FOR PORTION OF needs this too: it inserts temporal leftovers to
+	 * preserve the untouched parts of the deleted row, and those must not
+	 * escape the view either.  For UPDATE, any WCO we add below will apply to
+	 * inserted leftovers as well.
 	 */
-	if (insert_or_update)
+	if (insert_or_update ||
+		(parsetree->commandType == CMD_DELETE && parsetree->forPortionOf != NULL))
 	{
 		bool		has_wco = RelationHasCheckOption(view);
 		bool		cascaded = RelationHasCascadedCheckOption(view);
@@ -4170,6 +4164,14 @@ RewriteQuery(Query *parsetree, List *rewrite_events, int orig_rt_length,
 		 * AcquireRewriteLocks should have locked the rel already.
 		 */
 		rt_entry_relation = relation_open(rt_entry->relid, NoLock);
+
+		/* We don't support FOR PORTION OF on views with INSTEAD OF triggers. */
+		if (parsetree->forPortionOf &&
+			rt_entry_relation->rd_rel->relkind == RELKIND_VIEW &&
+			view_has_instead_trigger(rt_entry_relation, event, NIL))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("views with INSTEAD OF triggers do not support FOR PORTION OF")));
 
 		/*
 		 * Rewrite the targetlist as needed for the command type.

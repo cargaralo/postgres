@@ -141,9 +141,13 @@ pgpa_build_scan(pgpa_plan_walker_context *walker, Plan *plan,
 				 * If multiple relations are being targeted by a single
 				 * foreign scan, then the foreign join has been pushed to the
 				 * remote side, and we want that to be reflected in the
-				 * generated advice.
+				 * generated advice. We can't emit FOREIGN_JOIN() advice for a
+				 * single relation, so treat that case as an ordinary scan.
 				 */
-				strategy = PGPA_SCAN_FOREIGN;
+				if (bms_membership(relids) == BMS_MULTIPLE)
+					strategy = PGPA_SCAN_FOREIGN;
+				else
+					strategy = PGPA_SCAN_ORDINARY;
 				break;
 			case T_Append:
 
@@ -241,7 +245,7 @@ pgpa_make_scan(pgpa_plan_walker_context *walker, Plan *plan,
 	pgpa_scan  *scan;
 
 	/* Create the scan object. */
-	scan = palloc(sizeof(pgpa_scan));
+	scan = palloc_object(pgpa_scan);
 	scan->plan = plan;
 	scan->strategy = strategy;
 	scan->relids = relids;

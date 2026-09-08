@@ -231,14 +231,18 @@ static BitmapOr *make_bitmap_or(List *bitmapplans);
 static NestLoop *make_nestloop(List *tlist,
 							   List *joinclauses, List *otherclauses, List *nestParams,
 							   Plan *lefttree, Plan *righttree,
-							   JoinType jointype, bool inner_unique);
+							   JoinType jointype,
+							   Relids ojrelids,
+							   bool inner_unique);
 static HashJoin *make_hashjoin(List *tlist,
 							   List *joinclauses, List *otherclauses,
 							   List *hashclauses,
 							   List *hashoperators, List *hashcollations,
 							   List *hashkeys,
 							   Plan *lefttree, Plan *righttree,
-							   JoinType jointype, bool inner_unique);
+							   JoinType jointype,
+							   Relids ojrelids,
+							   bool inner_unique);
 static Hash *make_hash(Plan *lefttree,
 					   List *hashkeys,
 					   Oid skewTable,
@@ -252,7 +256,9 @@ static MergeJoin *make_mergejoin(List *tlist,
 								 bool *mergereversals,
 								 bool *mergenullsfirst,
 								 Plan *lefttree, Plan *righttree,
-								 JoinType jointype, bool inner_unique,
+								 JoinType jointype,
+								 Relids ojrelids,
+								 bool inner_unique,
 								 bool skip_mark_restore);
 static Sort *make_sort(Plan *lefttree, int numCols,
 					   AttrNumber *sortColIdx, Oid *sortOperators,
@@ -1027,21 +1033,22 @@ create_gating_plan(PlannerInfo *root, Path *path, Plan *plan,
 							   (Node *) gating_quals, plan);
 
 	/*
-	 * We might have had a trivial Result plan already.  Stacking one Result
-	 * atop another is silly, so if that applies, just discard the input plan.
-	 * (We're assuming its targetlist is uninteresting; it should be either
-	 * the same as the result of build_path_tlist, or a simplified version.
-	 * However, we preserve the set of relids that it purports to scan and
-	 * attribute that to our replacement Result instead, and likewise for the
-	 * result_type.)
+	 * See if we can reduce down stacked Result nodes to a single node.  This
+	 * is only possible when the nested Result has no subplan and no gating
+	 * qual.  If we do remove the nested Result, we maintain the relids and
+	 * result_type for EXPLAIN.
 	 */
 	if (IsA(plan, Result))
 	{
 		Result	   *rplan = (Result *) plan;
 
-		gplan->plan.lefttree = NULL;
-		gplan->relids = rplan->relids;
-		gplan->result_type = rplan->result_type;
+		if (rplan->plan.lefttree == NULL &&
+			rplan->resconstantqual == NULL)
+		{
+			gplan->plan.lefttree = NULL;
+			gplan->relids = rplan->relids;
+			gplan->result_type = rplan->result_type;
+		}
 	}
 
 	/*
@@ -1729,8 +1736,8 @@ create_memoize_plan(PlannerInfo *root, MemoizePath *best_path, int flags)
 
 	nkeys = list_length(param_exprs);
 	Assert(nkeys > 0);
-	operators = palloc(nkeys * sizeof(Oid));
-	collations = palloc(nkeys * sizeof(Oid));
+	operators = palloc_array(Oid, nkeys);
+	collations = palloc_array(Oid, nkeys);
 
 	i = 0;
 	forboth(lc, param_exprs, lc2, best_path->hash_operators)
@@ -2067,6 +2074,7 @@ create_incrementalsort_plan(PlannerInfo *root, IncrementalSortPath *best_path,
 											  best_path->nPresortedCols);
 
 	copy_generic_path_info(&plan->sort.plan, (Path *) best_path);
+	plan->numGroups = best_path->numGroups;
 
 	return plan;
 }
@@ -2271,7 +2279,7 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 			maxref = gc->tleSortGroupRef;
 	}
 
-	grouping_map = (AttrNumber *) palloc0((maxref + 1) * sizeof(AttrNumber));
+	grouping_map = palloc0_array(AttrNumber, maxref + 1);
 
 	/* Now look up the column numbers in the child's tlist */
 	foreach(lc, root->processed_groupClause)
@@ -2710,9 +2718,9 @@ create_limit_plan(PlannerInfo *root, LimitPath *best_path, int flags)
 		ListCell   *l;
 
 		numUniqkeys = list_length(parse->sortClause);
-		uniqColIdx = (AttrNumber *) palloc(numUniqkeys * sizeof(AttrNumber));
-		uniqOperators = (Oid *) palloc(numUniqkeys * sizeof(Oid));
-		uniqCollations = (Oid *) palloc(numUniqkeys * sizeof(Oid));
+		uniqColIdx = palloc_array(AttrNumber, numUniqkeys);
+		uniqOperators = palloc_array(Oid, numUniqkeys);
+		uniqCollations = palloc_array(Oid, numUniqkeys);
 
 		numUniqkeys = 0;
 		foreach(l, parse->sortClause)
@@ -4191,6 +4199,8 @@ create_nestloop_plan(PlannerInfo *root,
 	Plan	   *outer_plan;
 	Plan	   *inner_plan;
 	Relids		outerrelids;
+	Relids		req_outer;
+	Relids		ojrelids;
 	List	   *tlist = build_path_tlist(root, &best_path->jpath.path);
 	List	   *joinrestrictclauses = best_path->jpath.joinrestrictinfo;
 	List	   *joinclauses;
@@ -4220,8 +4230,17 @@ create_nestloop_plan(PlannerInfo *root,
 	/* NestLoop can project, so no need to be picky about child tlists */
 	outer_plan = create_plan_recurse(root, best_path->jpath.outerjoinpath, 0);
 
-	/* For a nestloop, include outer relids in curOuterRels for inner side */
+	/*
+	 * Include the outer relids in curOuterRels while building the inner side.
+	 * If the outer rel is a child rel, also include its top parent's relids.
+	 * We need both forms, since Vars in the inner side refer to the child rel
+	 * while PlaceHolderInfo.ph_eval_at is expressed in terms of top parent
+	 * rels.
+	 */
 	outerrelids = best_path->jpath.outerjoinpath->parent->relids;
+	if (best_path->jpath.outerjoinpath->parent->top_parent_relids)
+		outerrelids = bms_union(outerrelids,
+								best_path->jpath.outerjoinpath->parent->top_parent_relids);
 	root->curOuterRels = bms_union(root->curOuterRels, outerrelids);
 
 	inner_plan = create_plan_recurse(root, best_path->jpath.innerjoinpath, 0);
@@ -4257,13 +4276,37 @@ create_nestloop_plan(PlannerInfo *root,
 			replace_nestloop_params(root, (Node *) otherclauses);
 	}
 
+	/* Identify any outer joins computed at this level */
+	ojrelids = bms_difference(best_path->jpath.path.parent->relids,
+							  bms_union(best_path->jpath.outerjoinpath->parent->relids,
+										best_path->jpath.innerjoinpath->parent->relids));
+
+	/*
+	 * The required-outer set may contain child rels if this path has been
+	 * reparameterized by an upper child join.  Include their top parents'
+	 * relids too, so that we can match both Vars referring to the child rels
+	 * and PlaceHolderVars whose PlaceHolderInfo.ph_eval_at is expressed in
+	 * terms of top parent rels.
+	 */
+	req_outer = PATH_REQ_OUTER((Path *) best_path);
+	if (req_outer)
+	{
+		int			rti = -1;
+
+		while ((rti = bms_next_member(req_outer, rti)) >= 0)
+		{
+			RelOptInfo *rel = find_base_rel_ignore_join(root, rti);
+
+			if (rel && rel->top_parent_relids)
+				req_outer = bms_union(req_outer, rel->top_parent_relids);
+		}
+	}
+
 	/*
 	 * Identify any nestloop parameters that should be supplied by this join
 	 * node, and remove them from root->curOuterParams.
 	 */
-	nestParams = identify_current_nestloop_params(root,
-												  outerrelids,
-												  PATH_REQ_OUTER((Path *) best_path));
+	nestParams = identify_current_nestloop_params(root, outerrelids, req_outer);
 
 	/*
 	 * While nestloop parameters that are Vars had better be available from
@@ -4328,6 +4371,7 @@ create_nestloop_plan(PlannerInfo *root,
 							  outer_plan,
 							  inner_plan,
 							  best_path->jpath.jointype,
+							  ojrelids,
 							  best_path->jpath.inner_unique);
 
 	copy_generic_path_info(&join_plan->join.plan, &best_path->jpath.path);
@@ -4342,6 +4386,7 @@ create_mergejoin_plan(PlannerInfo *root,
 	MergeJoin  *join_plan;
 	Plan	   *outer_plan;
 	Plan	   *inner_plan;
+	Relids		ojrelids;
 	List	   *tlist = build_path_tlist(root, &best_path->jpath.path);
 	List	   *joinclauses;
 	List	   *otherclauses;
@@ -4419,6 +4464,11 @@ create_mergejoin_plan(PlannerInfo *root,
 	 */
 	mergeclauses = get_switched_clauses(best_path->path_mergeclauses,
 										best_path->jpath.outerjoinpath->parent->relids);
+
+	/* Identify any outer joins computed at this level */
+	ojrelids = bms_difference(best_path->jpath.path.parent->relids,
+							  bms_union(outer_path->parent->relids,
+										inner_path->parent->relids));
 
 	/*
 	 * Create explicit sort nodes for the outer and inner paths if necessary.
@@ -4526,10 +4576,10 @@ create_mergejoin_plan(PlannerInfo *root,
 	 */
 	nClauses = list_length(mergeclauses);
 	Assert(nClauses == list_length(best_path->path_mergeclauses));
-	mergefamilies = (Oid *) palloc(nClauses * sizeof(Oid));
-	mergecollations = (Oid *) palloc(nClauses * sizeof(Oid));
-	mergereversals = (bool *) palloc(nClauses * sizeof(bool));
-	mergenullsfirst = (bool *) palloc(nClauses * sizeof(bool));
+	mergefamilies = palloc_array(Oid, nClauses);
+	mergecollations = palloc_array(Oid, nClauses);
+	mergereversals = palloc_array(bool, nClauses);
+	mergenullsfirst = palloc_array(bool, nClauses);
 
 	opathkey = NULL;
 	opeclass = NULL;
@@ -4680,6 +4730,7 @@ create_mergejoin_plan(PlannerInfo *root,
 							   outer_plan,
 							   inner_plan,
 							   best_path->jpath.jointype,
+							   ojrelids,
 							   best_path->jpath.inner_unique,
 							   best_path->skip_mark_restore);
 
@@ -4697,6 +4748,7 @@ create_hashjoin_plan(PlannerInfo *root,
 	Hash	   *hash_plan;
 	Plan	   *outer_plan;
 	Plan	   *inner_plan;
+	Relids		ojrelids;
 	List	   *tlist = build_path_tlist(root, &best_path->jpath.path);
 	List	   *joinclauses;
 	List	   *otherclauses;
@@ -4845,6 +4897,11 @@ create_hashjoin_plan(PlannerInfo *root,
 		hash_plan->rows_total = best_path->inner_rows_total;
 	}
 
+	/* Identify any outer joins computed at this level */
+	ojrelids = bms_difference(best_path->jpath.path.parent->relids,
+							  bms_union(best_path->jpath.outerjoinpath->parent->relids,
+										best_path->jpath.innerjoinpath->parent->relids));
+
 	join_plan = make_hashjoin(tlist,
 							  joinclauses,
 							  otherclauses,
@@ -4855,6 +4912,7 @@ create_hashjoin_plan(PlannerInfo *root,
 							  outer_plan,
 							  (Plan *) hash_plan,
 							  best_path->jpath.jointype,
+							  ojrelids,
 							  best_path->jpath.inner_unique);
 
 	copy_generic_path_info(&join_plan->join.plan, &best_path->jpath.path);
@@ -5285,7 +5343,7 @@ order_qual_clauses(PlannerInfo *root, List *clauses)
 	 * Collect the items and costs into an array.  This is to avoid repeated
 	 * cost_qual_eval work if the inputs aren't RestrictInfos.
 	 */
-	items = (QualItem *) palloc(nitems * sizeof(QualItem));
+	items = palloc_array(QualItem, nitems);
 	i = 0;
 	foreach(lc, clauses)
 	{
@@ -5441,7 +5499,8 @@ label_incrementalsort_with_costsize(PlannerInfo *root, IncrementalSort *plan,
 						  lefttree->plan_width,
 						  0.0,
 						  work_mem,
-						  limit_tuples);
+						  limit_tuples,
+						  &plan->numGroups);
 	plan->sort.plan.startup_cost = sort_path.startup_cost;
 	plan->sort.plan.total_cost = sort_path.total_cost;
 	plan->sort.plan.plan_rows = lefttree->plan_rows;
@@ -5933,6 +5992,7 @@ make_nestloop(List *tlist,
 			  Plan *lefttree,
 			  Plan *righttree,
 			  JoinType jointype,
+			  Relids ojrelids,
 			  bool inner_unique)
 {
 	NestLoop   *node = makeNode(NestLoop);
@@ -5945,6 +6005,7 @@ make_nestloop(List *tlist,
 	node->join.jointype = jointype;
 	node->join.inner_unique = inner_unique;
 	node->join.joinqual = joinclauses;
+	node->join.ojrelids = ojrelids;
 	node->nestParams = nestParams;
 
 	return node;
@@ -5961,6 +6022,7 @@ make_hashjoin(List *tlist,
 			  Plan *lefttree,
 			  Plan *righttree,
 			  JoinType jointype,
+			  Relids ojrelids,
 			  bool inner_unique)
 {
 	HashJoin   *node = makeNode(HashJoin);
@@ -5977,6 +6039,7 @@ make_hashjoin(List *tlist,
 	node->join.jointype = jointype;
 	node->join.inner_unique = inner_unique;
 	node->join.joinqual = joinclauses;
+	node->join.ojrelids = ojrelids;
 
 	return node;
 }
@@ -6016,6 +6079,7 @@ make_mergejoin(List *tlist,
 			   Plan *lefttree,
 			   Plan *righttree,
 			   JoinType jointype,
+			   Relids ojrelids,
 			   bool inner_unique,
 			   bool skip_mark_restore)
 {
@@ -6035,6 +6099,7 @@ make_mergejoin(List *tlist,
 	node->join.jointype = jointype;
 	node->join.inner_unique = inner_unique;
 	node->join.joinqual = joinclauses;
+	node->join.ojrelids = ojrelids;
 
 	return node;
 }
@@ -6165,10 +6230,10 @@ prepare_sort_from_pathkeys(Plan *lefttree, List *pathkeys,
 	 * We will need at most list_length(pathkeys) sort columns; possibly less
 	 */
 	numsortkeys = list_length(pathkeys);
-	sortColIdx = (AttrNumber *) palloc(numsortkeys * sizeof(AttrNumber));
-	sortOperators = (Oid *) palloc(numsortkeys * sizeof(Oid));
-	collations = (Oid *) palloc(numsortkeys * sizeof(Oid));
-	nullsFirst = (bool *) palloc(numsortkeys * sizeof(bool));
+	sortColIdx = palloc_array(AttrNumber, numsortkeys);
+	sortOperators = palloc_array(Oid, numsortkeys);
+	collations = palloc_array(Oid, numsortkeys);
+	nullsFirst = palloc_array(bool, numsortkeys);
 
 	numsortkeys = 0;
 
@@ -6406,10 +6471,10 @@ make_sort_from_sortclauses(List *sortcls, Plan *lefttree)
 
 	/* Convert list-ish representation to arrays wanted by executor */
 	numsortkeys = list_length(sortcls);
-	sortColIdx = (AttrNumber *) palloc(numsortkeys * sizeof(AttrNumber));
-	sortOperators = (Oid *) palloc(numsortkeys * sizeof(Oid));
-	collations = (Oid *) palloc(numsortkeys * sizeof(Oid));
-	nullsFirst = (bool *) palloc(numsortkeys * sizeof(bool));
+	sortColIdx = palloc_array(AttrNumber, numsortkeys);
+	sortOperators = palloc_array(Oid, numsortkeys);
+	collations = palloc_array(Oid, numsortkeys);
+	nullsFirst = palloc_array(bool, numsortkeys);
 
 	numsortkeys = 0;
 	foreach(l, sortcls)
@@ -6457,10 +6522,10 @@ make_sort_from_groupcols(List *groupcls,
 
 	/* Convert list-ish representation to arrays wanted by executor */
 	numsortkeys = list_length(groupcls);
-	sortColIdx = (AttrNumber *) palloc(numsortkeys * sizeof(AttrNumber));
-	sortOperators = (Oid *) palloc(numsortkeys * sizeof(Oid));
-	collations = (Oid *) palloc(numsortkeys * sizeof(Oid));
-	nullsFirst = (bool *) palloc(numsortkeys * sizeof(bool));
+	sortColIdx = palloc_array(AttrNumber, numsortkeys);
+	sortOperators = palloc_array(Oid, numsortkeys);
+	collations = palloc_array(Oid, numsortkeys);
+	nullsFirst = palloc_array(bool, numsortkeys);
 
 	numsortkeys = 0;
 	foreach(l, groupcls)

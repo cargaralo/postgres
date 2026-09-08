@@ -976,7 +976,7 @@ count_usable_fds(int max_to_probe, int *usable_fds, int *already_open)
 #endif
 
 	size = 1024;
-	fd = (int *) palloc(size * sizeof(int));
+	fd = palloc_array(int, size);
 
 #ifdef HAVE_GETRLIMIT
 	getrlimit_status = getrlimit(RLIMIT_NOFILE, &rlim);
@@ -1011,7 +1011,7 @@ count_usable_fds(int max_to_probe, int *usable_fds, int *already_open)
 		if (used >= size)
 		{
 			size *= 2;
-			fd = (int *) repalloc(fd, size * sizeof(int));
+			fd = repalloc_array(fd, int, size);
 		}
 		fd[used++] = thisfd;
 
@@ -1521,8 +1521,8 @@ ReportTemporaryFileUsage(const char *path, pgoff_t size)
 	{
 		if ((size / 1024) >= log_temp_files)
 			ereport(LOG,
-					(errmsg("temporary file: path \"%s\", size %lu",
-							path, (unsigned long) size)));
+					(errmsg("temporary file: path \"%s\", size %lld",
+							path, (long long) size)));
 	}
 }
 
@@ -3181,9 +3181,7 @@ void
 AtEOSubXact_Files(bool isCommit, SubTransactionId mySubid,
 				  SubTransactionId parentSubid)
 {
-	Index		i;
-
-	for (i = 0; i < numAllocatedDescs; i++)
+	for (int i = 0; i < numAllocatedDescs; i++)
 	{
 		if (allocatedDescs[i].create_subid == mySubid)
 		{

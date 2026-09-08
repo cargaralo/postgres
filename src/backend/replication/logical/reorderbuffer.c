@@ -1288,7 +1288,7 @@ ReorderBufferIterTXNInit(ReorderBuffer *rb, ReorderBufferTXN *txn,
 	Size		nr_txns = 0;
 	ReorderBufferIterTXNState *state;
 	dlist_iter	cur_txn_i;
-	int32		off;
+	Size		off;
 
 	*iter_state = NULL;
 
@@ -1505,7 +1505,7 @@ static void
 ReorderBufferIterTXNFinish(ReorderBuffer *rb,
 						   ReorderBufferIterTXNState *state)
 {
-	int32		off;
+	Size		off;
 
 	for (off = 0; off < state->nr_txns; off++)
 	{
@@ -2132,26 +2132,36 @@ ReorderBufferSaveTXNSnapshot(ReorderBuffer *rb, ReorderBufferTXN *txn,
 }
 
 /*
- * Mark the given transaction as streamed if it's a top-level transaction
- * or has changes.
+ * Mark the given transaction as streamed, if appropriate.
+ *
+ * A top-level transaction is always marked.  A subtransaction is marked
+ * only when it has changes and its top-level transaction is already
+ * marked as streamed.
  */
 static void
 ReorderBufferMaybeMarkTXNStreamed(ReorderBuffer *rb, ReorderBufferTXN *txn)
 {
 	/*
-	 * The top-level transaction, is marked as streamed always, even if it
-	 * does not contain any changes (that is, when all the changes are in
-	 * subtransactions).
-	 *
-	 * For subtransactions, we only mark them as streamed when there are
-	 * changes in them.
-	 *
-	 * We do it this way because of aborts - we don't want to send aborts for
-	 * XIDs the downstream is not aware of. And of course, it always knows
-	 * about the top-level xact (we send the XID in all messages), but we
-	 * never stream XIDs of empty subxacts.
+	 * The top-level transaction is marked as streamed always, even if it does
+	 * not contain any changes (that is, when all the changes are in
+	 * subtransactions).  The downstream always knows about it, since we send
+	 * its XID in every message.
 	 */
-	if (rbtxn_is_toptxn(txn) || (txn->nentries_mem != 0))
+	if (rbtxn_is_toptxn(txn))
+	{
+		/* We only reach here when streaming is supported. */
+		Assert(ReorderBufferCanStream(rb));
+		txn->txn_flags |= RBTXN_IS_STREAMED;
+		return;
+	}
+
+	/*
+	 * A subtransaction is marked only when it has changes, and only when its
+	 * top-level transaction has already been marked as streamed.  We never
+	 * stream XIDs of empty subxacts, and we must not send an abort for an XID
+	 * the downstream has never heard of.
+	 */
+	if (txn->nentries_mem != 0 && rbtxn_is_streamed(rbtxn_get_toptxn(txn)))
 		txn->txn_flags |= RBTXN_IS_STREAMED;
 }
 
@@ -2166,21 +2176,13 @@ static void
 ReorderBufferResetTXN(ReorderBuffer *rb, ReorderBufferTXN *txn,
 					  Snapshot snapshot_now,
 					  CommandId command_id,
-					  XLogRecPtr last_lsn,
-					  ReorderBufferChange *specinsert)
+					  XLogRecPtr last_lsn)
 {
 	/* Discard the changes that we just streamed */
 	ReorderBufferTruncateTXN(rb, txn, rbtxn_is_prepared(txn));
 
 	/* Free all resources allocated for toast reconstruction */
 	ReorderBufferToastReset(rb, txn);
-
-	/* Return the spec insert change if it is not NULL */
-	if (specinsert != NULL)
-	{
-		ReorderBufferFreeChange(rb, specinsert, true);
-		specinsert = NULL;
-	}
 
 	/*
 	 * For the streaming case, stop the stream and remember the command ID and
@@ -2500,7 +2502,10 @@ ReorderBufferProcessTXN(ReorderBuffer *rb, ReorderBufferTXN *txn,
 								elog(ERROR, "could not open relation with OID %u", relid);
 
 							if (!RelationIsLogicallyLogged(rel))
+							{
+								RelationClose(rel);
 								continue;
+							}
 
 							relations[nrelations++] = rel;
 						}
@@ -2761,6 +2766,13 @@ ReorderBufferProcessTXN(ReorderBuffer *rb, ReorderBufferTXN *txn,
 			CurrentResourceOwner = cowner;
 		}
 
+		/* Free the specinsert change before freeing the ReorderBufferTXN */
+		if (specinsert != NULL)
+		{
+			ReorderBufferFreeChange(rb, specinsert, true);
+			specinsert = NULL;
+		}
+
 		/*
 		 * The error code ERRCODE_TRANSACTION_ROLLBACK indicates a concurrent
 		 * abort of the (sub)transaction we are streaming or preparing. We
@@ -2794,8 +2806,7 @@ ReorderBufferProcessTXN(ReorderBuffer *rb, ReorderBufferTXN *txn,
 
 			/* Reset the TXN so that it is allowed to stream remaining data. */
 			ReorderBufferResetTXN(rb, txn, snapshot_now,
-								  command_id, prev_lsn,
-								  specinsert);
+								  command_id, prev_lsn);
 		}
 		else
 		{
@@ -2981,11 +2992,18 @@ ReorderBufferPrepare(ReorderBuffer *rb, TransactionId xid,
 						txn->prepare_time, txn->origin_id, txn->origin_lsn);
 
 	/*
-	 * Send a prepare if not already done so. This might occur if we have
-	 * detected a concurrent abort while replaying the non-streaming
-	 * transaction.
+	 * Send a prepare if not already done so. The "not already sent" case can
+	 * occur if we have detected a concurrent abort while replaying the
+	 * non-streaming transaction; we still send the prepare so that later when
+	 * rollback prepared is decoded and sent, the downstream should be able to
+	 * rollback such a xact. See comments atop DecodePrepare.
+	 *
+	 * Skip this for a transaction that made no changes to the database (i.e.
+	 * has no base snapshot), as we haven't sent any changes for it. Such a
+	 * transaction is cleaned up without invoking the commit/rollback prepared
+	 * callbacks in ReorderBufferFinishPrepared().
 	 */
-	if (!rbtxn_sent_prepare(txn))
+	if (!rbtxn_sent_prepare(txn) && txn->base_snapshot != NULL)
 	{
 		rb->prepare(rb, txn, txn->final_lsn);
 		txn->txn_flags |= RBTXN_SENT_PREPARE;
@@ -3050,6 +3068,25 @@ ReorderBufferFinishPrepared(ReorderBuffer *rb, TransactionId xid,
 		 */
 		ReorderBufferReplay(txn, rb, xid, txn->final_lsn, txn->end_lsn,
 							txn->prepare_time, txn->origin_id, txn->origin_lsn);
+	}
+
+	/*
+	 * If this transaction has no snapshot, it didn't make any changes to the
+	 * database, so there's nothing to decode.  Note that
+	 * ReorderBufferCommitChild will have transferred any snapshots from
+	 * subtransactions if there were any.
+	 */
+	if (txn->base_snapshot == NULL)
+	{
+		Assert(txn->ninvalidations == 0);
+		Assert(!rbtxn_sent_prepare(txn));
+
+		/*
+		 * Removing this txn before a commit might result in the computation
+		 * of an incorrect restart_lsn. See SnapBuildProcessRunningXacts.
+		 */
+		ReorderBufferCleanupTXN(rb, txn);
+		return;
 	}
 
 	txn->final_lsn = commit_lsn;
@@ -3254,7 +3291,6 @@ ReorderBufferImmediateInvalidation(ReorderBuffer *rb, uint32 ninvalidations,
 	bool		use_subtxn = IsTransactionOrTransactionBlock();
 	MemoryContext ccxt = CurrentMemoryContext;
 	ResourceOwner cowner = CurrentResourceOwner;
-	int			i;
 
 	if (use_subtxn)
 		BeginInternalSubTransaction("replay");
@@ -3268,7 +3304,7 @@ ReorderBufferImmediateInvalidation(ReorderBuffer *rb, uint32 ninvalidations,
 	if (use_subtxn)
 		AbortCurrentTransaction();
 
-	for (i = 0; i < ninvalidations; i++)
+	for (uint32 i = 0; i < ninvalidations; i++)
 		LocalExecuteInvalidationMessage(&invalidations[i]);
 
 	if (use_subtxn)
@@ -3638,9 +3674,7 @@ ReorderBufferAddDistributedInvalidations(ReorderBuffer *rb, TransactionId xid,
 static void
 ReorderBufferExecuteInvalidations(uint32 nmsgs, SharedInvalidationMessage *msgs)
 {
-	int			i;
-
-	for (i = 0; i < nmsgs; i++)
+	for (uint32 i = 0; i < nmsgs; i++)
 		LocalExecuteInvalidationMessage(&msgs[i]);
 }
 
@@ -4566,7 +4600,7 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 
 	while (restored < max_changes_in_memory && *segno <= last_segno)
 	{
-		int			readBytes;
+		ssize_t		readBytes;
 		ReorderBufferDiskChange *ondisk;
 
 		CHECK_FOR_INTERRUPTS();
@@ -4631,9 +4665,9 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 		else if (readBytes != sizeof(ReorderBufferDiskChange))
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not read from reorderbuffer spill file: read %d instead of %u bytes",
+					 errmsg("could not read from reorderbuffer spill file: read %zd of %zu",
 							readBytes,
-							(uint32) sizeof(ReorderBufferDiskChange))));
+							sizeof(ReorderBufferDiskChange))));
 
 		file->curOffset += readBytes;
 
@@ -4656,9 +4690,9 @@ ReorderBufferRestoreChanges(ReorderBuffer *rb, ReorderBufferTXN *txn,
 		else if (readBytes != ondisk->size - sizeof(ReorderBufferDiskChange))
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not read from reorderbuffer spill file: read %d instead of %u bytes",
+					 errmsg("could not read from reorderbuffer spill file: read %zd of %zu",
 							readBytes,
-							(uint32) (ondisk->size - sizeof(ReorderBufferDiskChange)))));
+							(ondisk->size - sizeof(ReorderBufferDiskChange)))));
 
 		file->curOffset += readBytes;
 
@@ -5134,7 +5168,7 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 		varlena    *varlena_pointer;
 
 		/* va_rawsize is the size of the original datum -- including header */
-		varatt_external toast_pointer;
+		varatt_external_oid toast_pointer;
 		varatt_indirect redirect_pointer;
 		varlena    *new_datum = NULL;
 		varlena    *reconstructed;
@@ -5202,10 +5236,10 @@ ReorderBufferToastReplace(ReorderBuffer *rb, ReorderBufferTXN *txn,
 				   VARSIZE(chunk) - VARHDRSZ);
 			data_done += VARSIZE(chunk) - VARHDRSZ;
 		}
-		Assert(data_done == VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer));
+		Assert(data_done == VARATT_EXTERNAL_OID_GET_EXTSIZE(toast_pointer));
 
 		/* make sure its marked as compressed or not */
-		if (VARATT_EXTERNAL_IS_COMPRESSED(toast_pointer))
+		if (VARATT_EXTERNAL_OID_IS_COMPRESSED(toast_pointer))
 			SET_VARSIZE_COMPRESSED(reconstructed, data_done + VARHDRSZ);
 		else
 			SET_VARSIZE(reconstructed, data_done + VARHDRSZ);
@@ -5363,7 +5397,7 @@ ApplyLogicalMappingFile(HTAB *tuplecid_data, const char *fname)
 {
 	char		path[MAXPGPATH];
 	int			fd;
-	int			readBytes;
+	ssize_t		readBytes;
 	LogicalRewriteMappingData map;
 
 	sprintf(path, "%s/%s", PG_LOGICAL_MAPPINGS_DIR, fname);
@@ -5398,9 +5432,9 @@ ApplyLogicalMappingFile(HTAB *tuplecid_data, const char *fname)
 		else if (readBytes != sizeof(LogicalRewriteMappingData))
 			ereport(ERROR,
 					(errcode_for_file_access(),
-					 errmsg("could not read from file \"%s\": read %d instead of %d bytes",
+					 errmsg("could not read from file \"%s\": read %zd of %zu",
 							path, readBytes,
-							(int32) sizeof(LogicalRewriteMappingData))));
+							sizeof(LogicalRewriteMappingData))));
 
 		key.rlocator = map.old_locator;
 		ItemPointerCopy(&map.old_tid,

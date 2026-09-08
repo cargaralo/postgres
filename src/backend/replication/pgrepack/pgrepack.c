@@ -13,11 +13,15 @@
 #include "postgres.h"
 
 #include "access/detoast.h"
+#include "commands/repack.h"
 #include "commands/repack_internal.h"
 #include "replication/snapbuild.h"
 #include "utils/memutils.h"
 
-PG_MODULE_MAGIC;
+PG_MODULE_MAGIC_EXT(
+					.name = "pgrepack",
+					.version = PG_VERSION
+);
 
 static void repack_startup(LogicalDecodingContext *ctx,
 						   OutputPluginOptions *opt, bool is_init);
@@ -47,7 +51,22 @@ static void
 repack_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 			   bool is_init)
 {
-	ctx->output_plugin_private = NULL;
+	RepackDecodingState *dstate;
+
+	if (!AmRepackWorker())
+	{
+		/* StartupDecodingContext() should have caught this case already */
+		elog(FATAL, "unexpected pgrepack startup outside of repack worker");
+	}
+
+	/* Initial setup of our private state */
+	Assert(CurrentMemoryContext == ctx->context);
+	dstate = palloc0_object(RepackDecodingState);
+	dstate->change_cxt = AllocSetContextCreate(ctx->context,
+											   "REPACK - change",
+											   ALLOCSET_DEFAULT_SIZES);
+	/* repack_setup_logical_decoding fills in the rest */
+	ctx->output_writer_private = dstate;
 
 	/* Probably unnecessary, as we don't use the SQL interface ... */
 	opt->output_type = OUTPUT_PLUGIN_BINARY_OUTPUT;

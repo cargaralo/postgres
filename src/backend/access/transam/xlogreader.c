@@ -185,15 +185,20 @@ XLogReaderFree(XLogReaderState *state)
  * with.  (That is enough for all "normal" records, but very large commit or
  * abort records might need more space.)
  *
+ * The caller must make sure that "reclength" is valid and within the
+ * XLogRecordMaxSize limit.
+ *
  * Note: This routine should *never* be called for xl_tot_len until the header
  * of the record has been fully validated.
  */
 static void
 allocate_recordbuf(XLogReaderState *state, uint32 reclength)
 {
-	uint32		newSize = reclength;
+	uint32		newSize;
 
-	newSize += XLOG_BLCKSZ - (newSize % XLOG_BLCKSZ);
+	Assert(reclength <= XLogRecordMaxSize);
+
+	newSize = TYPEALIGN(XLOG_BLCKSZ, reclength);
 	newSize = Max(newSize, 5 * Max(BLCKSZ, XLOG_BLCKSZ));
 
 	if (state->readRecordBuf)
@@ -673,6 +678,21 @@ restart:
 								  (uint32) SizeOfXLogRecord, total_len);
 			goto err;
 		}
+
+		/*
+		 * If the record length exceeds the maximum allowed size, don't try to
+		 * reconstruct it.  The backend enforces the same limit in
+		 * XLogRecordAssemble().
+		 */
+		if (total_len > XLogRecordMaxSize)
+		{
+			report_invalid_record(state,
+								  "invalid record length at %X/%08X: expected at most %u, got %u",
+								  LSN_FORMAT_ARGS(RecPtr),
+								  XLogRecordMaxSize, total_len);
+			goto err;
+		}
+
 		/* We'll validate the header once we have the next page. */
 		gotheader = false;
 	}
@@ -1148,6 +1168,15 @@ ValidXLogRecordHeader(XLogReaderState *state, XLogRecPtr RecPtr,
 							  (uint32) SizeOfXLogRecord, record->xl_tot_len);
 		return false;
 	}
+
+	if (record->xl_tot_len > XLogRecordMaxSize)
+	{
+		report_invalid_record(state,
+							  "invalid record length at %X/%08X: expected at most %u, got %u",
+							  LSN_FORMAT_ARGS(RecPtr),
+							  XLogRecordMaxSize, record->xl_tot_len);
+		return false;
+	}
 	if (!RmgrIdIsValid(record->xl_rmid))
 	{
 		report_invalid_record(state,
@@ -1548,8 +1577,8 @@ WALRead(XLogReaderState *state,
 	while (nbytes > 0)
 	{
 		uint32		startoff;
-		int			segbytes;
-		int			readbytes;
+		size_t		segbytes;
+		ssize_t		readbytes;
 
 		startoff = XLogSegmentOffset(recptr, state->segcxt.ws_segsize);
 
@@ -1597,9 +1626,6 @@ WALRead(XLogReaderState *state,
 
 #ifndef FRONTEND
 		pgstat_report_wait_end();
-
-		pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_READ,
-								io_start, 1, readbytes);
 #endif
 
 		if (readbytes <= 0)
@@ -1611,6 +1637,11 @@ WALRead(XLogReaderState *state,
 			errinfo->wre_seg = state->seg;
 			return false;
 		}
+
+#ifndef FRONTEND
+		pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_READ,
+								io_start, 1, readbytes);
+#endif
 
 		/* Update state for read */
 		recptr += readbytes;
@@ -1898,7 +1929,7 @@ DecodeXLogRecord(XLogReaderState *state,
 				{
 					report_invalid_record(state,
 										  "neither BKPIMAGE_HAS_HOLE nor BKPIMAGE_COMPRESSED set, but block image length is %d at %X/%08X",
-										  blk->data_len,
+										  blk->bimg_len,
 										  LSN_FORMAT_ARGS(state->ReadRecPtr));
 					goto err;
 				}

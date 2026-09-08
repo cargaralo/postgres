@@ -85,7 +85,7 @@ AtEOXact_PgStat_DroppedStats(PgStat_SubXactStatus *xact_state, bool isCommit)
 			 * Transaction that dropped an object committed. Drop the stats
 			 * too.
 			 */
-			if (!pgstat_drop_entry(it->kind, it->dboid, objid))
+			if (!pgstat_drop_entry(it->kind, it->dboid, objid, true))
 				not_freed_count++;
 		}
 		else if (!isCommit && pending->is_create)
@@ -94,7 +94,7 @@ AtEOXact_PgStat_DroppedStats(PgStat_SubXactStatus *xact_state, bool isCommit)
 			 * Transaction that created an object aborted. Drop the stats
 			 * associated with the object.
 			 */
-			if (!pgstat_drop_entry(it->kind, it->dboid, objid))
+			if (!pgstat_drop_entry(it->kind, it->dboid, objid, true))
 				not_freed_count++;
 		}
 
@@ -160,7 +160,7 @@ AtEOSubXact_PgStat_DroppedStats(PgStat_SubXactStatus *xact_state,
 			 * Subtransaction creating a new stats object aborted. Drop the
 			 * stats object.
 			 */
-			if (!pgstat_drop_entry(it->kind, it->dboid, objid))
+			if (!pgstat_drop_entry(it->kind, it->dboid, objid, true))
 				not_freed_count++;
 			pfree(pending);
 		}
@@ -285,8 +285,7 @@ pgstat_get_transactional_drops(bool isCommit, xl_xact_stats_item **items)
 	Assert(!isCommit || xact_state->nest_level == 1);
 	Assert(!isCommit || xact_state->prev == NULL);
 
-	*items = palloc(dclist_count(&xact_state->pending_drops)
-					* sizeof(xl_xact_stats_item));
+	*items = palloc_array(xl_xact_stats_item, dclist_count(&xact_state->pending_drops));
 
 	dclist_foreach(iter, &xact_state->pending_drops)
 	{
@@ -323,7 +322,7 @@ pgstat_execute_transactional_drops(int ndrops, struct xl_xact_stats_item *items,
 		xl_xact_stats_item *it = &items[i];
 		uint64		objid = ((uint64) it->objid_hi) << 32 | it->objid_lo;
 
-		if (!pgstat_drop_entry(it->kind, it->dboid, objid))
+		if (!pgstat_drop_entry(it->kind, it->dboid, objid, true))
 			not_freed_count++;
 	}
 

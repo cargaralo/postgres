@@ -34,6 +34,23 @@
 #define US_PER_MS	INT64CONST(1000)
 
 /*
+ * The offset between the PostgreSQL epoch (2000-01-01) and the Unix epoch
+ * (1970-01-01) in microseconds. Subtract this from a Unix-epoch microseconds
+ * to get a TimestampTz.
+ */
+#define PG_UNIX_EPOCH_OFFSET_US \
+	((int64) (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY * USECS_PER_SEC)
+
+/*
+ * Valid timestamp range for UUID version 7, expressed in PostgreSQL-epoch
+ * microseconds. UUIDv7 uses a 48-bit unsigned millisecond field relative
+ * to the Unix epoch, so the representable window is [1970-01-01, ~10889].
+ */
+#define UUIDV7_MIN_TIMESTAMP	(-PG_UNIX_EPOCH_OFFSET_US)
+#define UUIDV7_MAX_TIMESTAMP \
+	(((INT64CONST(1) << 48) - 1) * US_PER_MS - PG_UNIX_EPOCH_OFFSET_US)
+
+/*
  * UUID version 7 uses 12 bits in "rand_a" to store  1/4096 (or 2^12) fractions of
  * sub-millisecond. While most Unix-like platforms provide nanosecond-precision
  * timestamps, some systems only offer microsecond precision, limiting us to 10
@@ -270,6 +287,24 @@ uuid_cmp(PG_FUNCTION_ARGS)
 	PG_RETURN_INT32(uuid_internal_cmp(arg1, arg2));
 }
 
+Datum
+uuid_larger(PG_FUNCTION_ARGS)
+{
+	pg_uuid_t  *arg1 = PG_GETARG_UUID_P(0);
+	pg_uuid_t  *arg2 = PG_GETARG_UUID_P(1);
+
+	PG_RETURN_UUID_P((uuid_internal_cmp(arg1, arg2) > 0) ? arg1 : arg2);
+}
+
+Datum
+uuid_smaller(PG_FUNCTION_ARGS)
+{
+	pg_uuid_t  *arg1 = PG_GETARG_UUID_P(0);
+	pg_uuid_t  *arg2 = PG_GETARG_UUID_P(1);
+
+	PG_RETURN_UUID_P((uuid_internal_cmp(arg1, arg2) < 0) ? arg1 : arg2);
+}
+
 /*
  * Sort support strategy routine
  */
@@ -295,7 +330,7 @@ uuid_sortsupport(PG_FUNCTION_ARGS)
 
 		ssup->ssup_extra = uss;
 
-		ssup->comparator = ssup_datum_unsigned_cmp;
+		ssup->comparator = ssup_datum_uint64_cmp;
 		ssup->abbrev_converter = uuid_abbrev_convert;
 		ssup->abbrev_abort = uuid_abbrev_abort;
 		ssup->abbrev_full_comparator = uuid_fast_cmp;
@@ -406,7 +441,7 @@ uuid_abbrev_convert(Datum original, SortSupport ssup)
 	/*
 	 * Byteswap on little-endian machines.
 	 *
-	 * This is needed so that ssup_datum_unsigned_cmp() (an unsigned integer
+	 * This is needed so that ssup_datum_uint64_cmp() (an unsigned integer
 	 * 3-way comparator) works correctly on all platforms.  If we didn't do
 	 * this, the comparator would have to call memcmp() with a pair of
 	 * pointers to the first byte of each abbreviated key, which is slower.
@@ -672,6 +707,13 @@ uuidv7_interval(PG_FUNCTION_ARGS)
 	int64		ns = get_real_time_ns_ascending();
 	int64		us;
 
+	/* Reject infinite intervals before any arithmetic */
+	if (INTERVAL_NOT_FINITE(shift))
+		ereport(ERROR,
+				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+				 errmsg("interval out of range for UUID version 7"),
+				 errdetail("UUID version 7 does not support infinite intervals.")));
+
 	/*
 	 * Shift the current timestamp by the given interval. To calculate time
 	 * shift correctly, we convert the UNIX epoch to TimestampTz and use
@@ -679,16 +721,26 @@ uuidv7_interval(PG_FUNCTION_ARGS)
 	 * precision.
 	 */
 
-	ts = (TimestampTz) (ns / NS_PER_US) -
-		(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY * USECS_PER_SEC;
+	ts = (TimestampTz) (ns / NS_PER_US) - PG_UNIX_EPOCH_OFFSET_US;
 
 	/* Compute time shift */
 	ts = DatumGetTimestampTz(DirectFunctionCall2(timestamptz_pl_interval,
 												 TimestampTzGetDatum(ts),
 												 IntervalPGetDatum(shift)));
 
-	/* Convert a TimestampTz value back to an UNIX epoch timestamp */
-	us = ts + (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY * USECS_PER_SEC;
+	/*
+	 * Reject timestamps outside the range representable by UUID version 7's
+	 * 48-bit millisecond field. We compare in PostgreSQL-epoch units so that
+	 * the subsequent conversion to Unix-epoch microseconds cannot overflow.
+	 */
+	if (ts < UUIDV7_MIN_TIMESTAMP || ts > UUIDV7_MAX_TIMESTAMP)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+				 errmsg("timestamp out of range for UUID version 7"),
+				 errdetail("UUID version 7 supports timestamps from 1970-01-01 to approximately year 10889.")));
+
+	/* Convert the TimestampTz value to a Unix-epoch timestamp in usec */
+	us = ts + PG_UNIX_EPOCH_OFFSET_US;
 
 	/* Generate an UUIDv7 */
 	uuid = generate_uuidv7(us / US_PER_MS, (us % US_PER_MS) * NS_PER_US + ns % NS_PER_US);
@@ -723,6 +775,19 @@ uuid_extract_timestamp(PG_FUNCTION_ARGS)
 
 	if (version == 1)
 	{
+		/*----------
+		 * UUIDv1 splits the 60-bit Gregorian timestamp into three fields that
+		 * are *not* stored most-significant-first (see RFC 9562 Sec. 5.1):
+		 *
+		 *  time_low  (bits 0-31)   octets 0-3, the least significant 32 bits
+		 *  time_mid  (bits 32-47)  octets 4-5, the middle 16 bits
+		 *  time_high (bits 48-59)  octet 6 low nibble + octet 7, the most
+		 *                          significant 12 bits (octet 6 high nibble
+		 *                          holds the version and is masked off)
+		 *
+		 * Reassemble the timestamp by shifting each field back to its place.
+		 *----------
+		 */
 		tms = ((uint64) uuid->data[0] << 24)
 			+ ((uint64) uuid->data[1] << 16)
 			+ ((uint64) uuid->data[2] << 8)
@@ -738,8 +803,50 @@ uuid_extract_timestamp(PG_FUNCTION_ARGS)
 		PG_RETURN_TIMESTAMPTZ(ts);
 	}
 
+	if (version == 6)
+	{
+		/*----------
+		 * UUIDv6 is a field-compatible reordering of UUIDv1 that stores the
+		 * 60-bit Gregorian timestamp most-significant-first (see RFC 9562
+		 * Sec. 5.6):
+		 *
+		 *  time_high (bits 28-59)  octets 0-3, the most significant 32 bits
+		 *  time_mid  (bits 12-27)  octets 4-5, the middle 16 bits
+		 *  time_low  (bits 0-11)   octet 6 low nibble + octet 7, the least
+		 *                          significant 12 bits (octet 6 high nibble
+		 *                          holds the version and is masked off)
+		 *
+		 * Note that the 12-bit field is the least significant one here,
+		 * while in UUIDv1 it is the most significant. The version nibble
+		 * therefore sits below time_high and time_mid rather than above
+		 * them, and compacting the timestamp squeezes it out: each of
+		 * octets 0-5 ends up 4 bits lower than a plain big-endian read
+		 * would put it, hence the 52/44/36/28/20/12 shift counts below.
+		 *----------
+		 */
+		tms = ((uint64) uuid->data[0] << 52)
+			+ ((uint64) uuid->data[1] << 44)
+			+ ((uint64) uuid->data[2] << 36)
+			+ ((uint64) uuid->data[3] << 28)
+			+ ((uint64) uuid->data[4] << 20)
+			+ ((uint64) uuid->data[5] << 12)
+			+ (((uint64) uuid->data[6] & 0xf) << 8)
+			+ ((uint64) uuid->data[7]);
+
+		/* convert 100-ns intervals to us, then adjust */
+		ts = (TimestampTz) (tms / 10) -
+			((uint64) POSTGRES_EPOCH_JDATE - GREGORIAN_EPOCH_JDATE) * SECS_PER_DAY * USECS_PER_SEC;
+		PG_RETURN_TIMESTAMPTZ(ts);
+	}
+
 	if (version == 7)
 	{
+		/*
+		 * UUIDv7 stores a 48-bit Unix timestamp in milliseconds (unix_ts_ms)
+		 * most-significant-first in octets 0-5 (see RFC 9562 Sec. 5.7). There
+		 * is no version nibble inside this field, so the bytes reassemble at
+		 * clean 8-bit boundaries.
+		 */
 		tms = (uuid->data[5])
 			+ (((uint64) uuid->data[4]) << 8)
 			+ (((uint64) uuid->data[3]) << 16)
@@ -748,8 +855,7 @@ uuid_extract_timestamp(PG_FUNCTION_ARGS)
 			+ (((uint64) uuid->data[0]) << 40);
 
 		/* convert ms to us, then adjust */
-		ts = (TimestampTz) (tms * US_PER_MS) -
-			(POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY * USECS_PER_SEC;
+		ts = (TimestampTz) (tms * US_PER_MS) - PG_UNIX_EPOCH_OFFSET_US;
 
 		PG_RETURN_TIMESTAMPTZ(ts);
 	}

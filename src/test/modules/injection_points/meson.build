@@ -45,11 +45,14 @@ tests += {
     'specs': [
       'basic',
       'inplace',
+      'reindex_concurrently_deferred',
       'repack',
       'repack_temporal',
       'repack_temporal_multirange',
       'repack_toast',
+      'ri_fastpath_reindex',
       'syscache-update-pruned',
+      'wait_cleanup',
       'heap_lock_update',
     ],
     'runningcheck': false, # see syscache-update-pruned

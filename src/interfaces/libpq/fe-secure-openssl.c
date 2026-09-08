@@ -25,6 +25,7 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <ctype.h>
+#include <limits.h>
 
 #include "libpq-fe.h"
 #include "fe-auth.h"
@@ -230,10 +231,40 @@ rloop:
 	return n;
 }
 
-bool
-pgtls_read_pending(PGconn *conn)
+ssize_t
+pgtls_bytes_pending(PGconn *conn)
 {
-	return SSL_pending(conn->ssl) > 0;
+	int			pending;
+
+	/*
+	 * OpenSSL readahead is documented to break SSL_pending().  Plus, we can't
+	 * afford to have OpenSSL take bytes off the socket without processing
+	 * them; that breaks the postconditions for pqsecure_drain_pending().
+	 */
+	Assert(!SSL_get_read_ahead(conn->ssl));
+
+	pending = SSL_pending(conn->ssl);
+	if (pending < 0)
+	{
+		/* shouldn't be possible */
+		Assert(false);
+		libpq_append_conn_error(conn, "OpenSSL reports negative bytes pending");
+		return -1;
+	}
+	else if (pending == INT_MAX)
+	{
+		/*
+		 * If we ever found a legitimate way to hit this, we'd need to loop
+		 * around in the caller to call pgtls_bytes_pending() again.  Throw an
+		 * error rather than complicate the code in that way, because
+		 * SSL_read() should be bounded to the size of a single TLS record,
+		 * and conn->inBuffer can't currently go past INT_MAX in size anyway.
+		 */
+		libpq_append_conn_error(conn, "OpenSSL reports INT_MAX bytes pending");
+		return -1;
+	}
+
+	return (ssize_t) pending;
 }
 
 ssize_t
@@ -340,7 +371,12 @@ char *
 pgtls_get_peer_certificate_hash(PGconn *conn, size_t *len)
 {
 	X509	   *peer_cert;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	EVP_MD	   *algo_type;
+	const char *algo_name;
+#else
 	const EVP_MD *algo_type;
+#endif
 	unsigned char hash[EVP_MAX_MD_SIZE];	/* size for SHA-512 */
 	unsigned int hash_size;
 	int			algo_nid;
@@ -375,6 +411,31 @@ pgtls_get_peer_certificate_hash(PGconn *conn, size_t *len)
 	 * (https://tools.ietf.org/html/rfc5929#section-4.1).  If something else
 	 * is used, the same hash as the signature algorithm is used.
 	 */
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	switch (algo_nid)
+	{
+		case NID_md5:
+		case NID_sha1:
+			algo_name = "SHA256";
+			break;
+		default:
+			algo_name = OBJ_nid2sn(algo_nid);
+			if (algo_name == NULL)
+			{
+				libpq_append_conn_error(conn, "could not find digest for NID %d",
+										algo_nid);
+				return NULL;
+			}
+			break;
+	}
+
+	algo_type = EVP_MD_fetch(NULL, algo_name, NULL);
+	if (algo_type == NULL)
+	{
+		libpq_append_conn_error(conn, "could not fetch digest \"%s\"", algo_name);
+		return NULL;
+	}
+#else
 	switch (algo_nid)
 	{
 		case NID_md5:
@@ -391,12 +452,20 @@ pgtls_get_peer_certificate_hash(PGconn *conn, size_t *len)
 			}
 			break;
 	}
+#endif
 
 	if (!X509_digest(peer_cert, algo_type, hash, &hash_size))
 	{
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+		EVP_MD_free(algo_type);
+#endif
 		libpq_append_conn_error(conn, "could not generate peer certificate hash");
 		return NULL;
 	}
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	EVP_MD_free(algo_type);
+#endif
 
 	/* save result */
 	cert_hash = malloc(hash_size);
@@ -769,7 +838,7 @@ initialize_SSL(PGconn *conn)
 	 * complicated if connections used different certificates. So now we
 	 * create a separate context for each connection, and accept the overhead.
 	 */
-	SSL_context = SSL_CTX_new(SSLv23_method());
+	SSL_context = SSL_CTX_new(TLS_method());
 	if (!SSL_context)
 	{
 		char	   *err = SSLerrmessage(ERR_get_error());
@@ -1516,7 +1585,6 @@ pgtls_close(PGconn *conn)
 			SSL_free(conn->ssl);
 			conn->ssl = NULL;
 			conn->ssl_in_use = false;
-			conn->ssl_handshake_started = false;
 		}
 
 		if (conn->peer)
@@ -1741,7 +1809,7 @@ pgconn_bio_read(BIO *h, char *buf, int size)
 	PGconn	   *conn = (PGconn *) BIO_get_data(h);
 	int			res;
 
-	res = pqsecure_raw_read(conn, buf, size);
+	res = (int) pqsecure_raw_read(conn, buf, size);
 	BIO_clear_retry_flags(h);
 	conn->last_read_was_eof = res == 0;
 	if (res < 0)
@@ -1764,9 +1832,6 @@ pgconn_bio_read(BIO *h, char *buf, int size)
 		}
 	}
 
-	if (res > 0)
-		conn->ssl_handshake_started = true;
-
 	return res;
 }
 
@@ -1775,7 +1840,7 @@ pgconn_bio_write(BIO *h, const char *buf, int size)
 {
 	int			res;
 
-	res = pqsecure_raw_write((PGconn *) BIO_get_data(h), buf, size);
+	res = (int) pqsecure_raw_write((PGconn *) BIO_get_data(h), buf, size);
 	BIO_clear_retry_flags(h);
 	if (res < 0)
 	{
@@ -1960,20 +2025,22 @@ PQssl_passwd_cb(char *buf, int size, int rwflag, void *userdata)
 static int
 ssl_protocol_version_to_openssl(const char *protocol)
 {
+#ifndef OPENSSL_NO_TLS1
 	if (pg_strcasecmp("TLSv1", protocol) == 0)
 		return TLS1_VERSION;
+#endif
 
-#ifdef TLS1_1_VERSION
+#ifndef OPENSSL_NO_TLS1_1
 	if (pg_strcasecmp("TLSv1.1", protocol) == 0)
 		return TLS1_1_VERSION;
 #endif
 
-#ifdef TLS1_2_VERSION
+#ifndef OPENSSL_NO_TLS1_2
 	if (pg_strcasecmp("TLSv1.2", protocol) == 0)
 		return TLS1_2_VERSION;
 #endif
 
-#ifdef TLS1_3_VERSION
+#ifndef OPENSSL_NO_TLS1_3
 	if (pg_strcasecmp("TLSv1.3", protocol) == 0)
 		return TLS1_3_VERSION;
 #endif

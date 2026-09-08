@@ -81,6 +81,7 @@ static OnConflictExpr *transformOnConflictClause(ParseState *pstate,
 static ForPortionOfExpr *transformForPortionOfClause(ParseState *pstate,
 													 int rtindex,
 													 const ForPortionOfClause *forPortionOf,
+													 const Node *whereClause,
 													 bool isUpdate);
 static int	count_rowexpr_columns(ParseState *pstate, Node *expr);
 static Query *transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
@@ -89,6 +90,9 @@ static Query *transformValuesClause(ParseState *pstate, SelectStmt *stmt);
 static Query *transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt);
 static Node *transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
 									   bool isTopLevel, List **targetlist);
+static void constructSetOpTargetlist(ParseState *pstate, SetOperationStmt *op,
+									 const List *ltargetlist, const List *rtargetlist,
+									 List **targetlist, const char *context, bool recursive);
 static void determineRecursiveColTypes(ParseState *pstate,
 									   Node *larg, List *nrtargetlist);
 static Query *transformReturnStmt(ParseState *pstate, ReturnStmt *stmt);
@@ -626,6 +630,7 @@ transformDeleteStmt(ParseState *pstate, DeleteStmt *stmt)
 		qry->forPortionOf = transformForPortionOfClause(pstate,
 														qry->resultRelation,
 														stmt->forPortionOf,
+														stmt->whereClause,
 														false);
 
 	qual = transformWhereClause(pstate, stmt->whereClause,
@@ -1319,6 +1324,7 @@ static ForPortionOfExpr *
 transformForPortionOfClause(ParseState *pstate,
 							int rtindex,
 							const ForPortionOfClause *forPortionOf,
+							const Node *whereClause,
 							bool isUpdate)
 {
 	Relation	targetrel = pstate->p_target_relation;
@@ -1335,11 +1341,11 @@ transformForPortionOfClause(ParseState *pstate,
 	ForPortionOfExpr *result;
 	Var		   *rangeVar;
 
-	/* We don't support FOR PORTION OF FDW queries. */
-	if (targetrel->rd_rel->relkind == RELKIND_FOREIGN_TABLE)
+	/* disallow FOR PORTION OF ... WHERE CURRENT OF */
+	if (whereClause && IsA(whereClause, CurrentOfExpr))
 		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("foreign tables don't support FOR PORTION OF")));
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("WHERE CURRENT OF with FOR PORTION OF is not implemented"));
 
 	result = makeNode(ForPortionOfExpr);
 
@@ -1489,9 +1495,6 @@ transformForPortionOfClause(ParseState *pstate,
 													args,
 													InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
 	}
-	if (contain_volatile_functions_after_planning((Expr *) result->targetRange))
-		ereport(ERROR,
-				(errmsg("FOR PORTION OF bounds cannot contain volatile functions")));
 
 	/*
 	 * Build overlapsExpr to use as an extra qual. This means we only hit rows
@@ -1606,7 +1609,6 @@ transformForPortionOfClause(ParseState *pstate,
 	else
 		result->rangeTargetList = NIL;
 
-	result->range_name = forPortionOf->range_name;
 	result->location = forPortionOf->location;
 	result->targetLocation = forPortionOf->target_location;
 
@@ -1811,14 +1813,12 @@ transformSelectStmt(ParseState *pstate, SelectStmt *stmt,
 
 	qry->groupClause = transformGroupClause(pstate,
 											stmt->groupClause,
-											stmt->groupByAll,
 											&qry->groupingSets,
 											&qry->targetList,
 											qry->sortClause,
 											EXPR_KIND_GROUP_BY,
 											false /* allow SQL92 rules */ );
 	qry->groupDistinct = stmt->groupDistinct;
-	qry->groupByAll = stmt->groupByAll;
 
 	if (stmt->distinctClause == NIL)
 	{
@@ -1958,7 +1958,7 @@ transformValuesClause(ParseState *pstate, SelectStmt *stmt)
 			/* Remember post-transformation length of first sublist */
 			sublist_length = list_length(sublist);
 			/* and allocate array for per-column lists */
-			colexprs = (List **) palloc0(sublist_length * sizeof(List *));
+			colexprs = palloc0_array(List *, sublist_length);
 		}
 		else if (sublist_length != list_length(sublist))
 		{
@@ -2230,8 +2230,7 @@ transformSetOperationStmt(ParseState *pstate, SelectStmt *stmt)
 	qry->targetList = NIL;
 	targetvars = NIL;
 	targetnames = NIL;
-	sortnscolumns = (ParseNamespaceColumn *)
-		palloc0(list_length(sostmt->colTypes) * sizeof(ParseNamespaceColumn));
+	sortnscolumns = palloc0_array(ParseNamespaceColumn, list_length(sostmt->colTypes));
 	sortcolindex = 0;
 
 	forfour(lct, sostmt->colTypes,
@@ -2601,7 +2600,7 @@ transformSetOperationTree(ParseState *pstate, SelectStmt *stmt,
  * given SetOperationStmt node.  context is a string for error messages
  * ("UNION" etc.).  recursive is true if it is a recursive union.
  */
-void
+static void
 constructSetOpTargetlist(ParseState *pstate, SetOperationStmt *op,
 						 const List *ltargetlist, const List *rtargetlist,
 						 List **targetlist, const char *context, bool recursive)
@@ -2884,6 +2883,7 @@ transformUpdateStmt(ParseState *pstate, UpdateStmt *stmt)
 		qry->forPortionOf = transformForPortionOfClause(pstate,
 														qry->resultRelation,
 														stmt->forPortionOf,
+														stmt->whereClause,
 														true);
 
 	nsitem = pstate->p_target_nsitem;
@@ -3866,7 +3866,7 @@ transformLockingClause(ParseState *pstate, Query *qry, LockingClause *lc,
 										   allrels, true);
 					break;
 				default:
-					/* ignore JOIN, SPECIAL, FUNCTION, VALUES, CTE RTEs */
+					/* ignore all other RTE kinds */
 					break;
 			}
 		}

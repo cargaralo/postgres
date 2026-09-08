@@ -544,9 +544,7 @@ struct pg_conn
 	AddrInfo   *addr;			/* the array of addresses for the currently
 								 * tried host */
 	bool		send_appname;	/* okay to send application_name? */
-	size_t		scram_client_key_len;
 	uint8	   *scram_client_key_binary;	/* binary SCRAM client key */
-	size_t		scram_server_key_len;
 	uint8	   *scram_server_key_binary;	/* binary SCRAM server key */
 	ProtocolVersion min_pversion;	/* protocol version to request */
 	ProtocolVersion max_pversion;	/* protocol version to request */
@@ -621,7 +619,6 @@ struct pg_conn
 
 	/* SSL structures */
 	bool		ssl_in_use;
-	bool		ssl_handshake_started;
 	bool		ssl_cert_requested; /* Did the server ask us for a cert? */
 	bool		ssl_cert_sent;	/* Did we send one in reply? */
 	bool		last_read_was_eof;
@@ -827,6 +824,7 @@ extern int	pqWriteReady(PGconn *conn);
 extern PostgresPollingStatusType pqsecure_open_client(PGconn *);
 extern void pqsecure_close(PGconn *);
 extern ssize_t pqsecure_read(PGconn *, void *ptr, size_t len);
+extern ssize_t pqsecure_bytes_pending(PGconn *);
 extern ssize_t pqsecure_write(PGconn *, const void *ptr, size_t len);
 extern ssize_t pqsecure_raw_read(PGconn *, void *ptr, size_t len);
 extern ssize_t pqsecure_raw_write(PGconn *, const void *ptr, size_t len);
@@ -863,9 +861,9 @@ extern void pgtls_close(PGconn *conn);
 extern ssize_t pgtls_read(PGconn *conn, void *ptr, size_t len);
 
 /*
- *	Is there unread data waiting in the SSL read buffer?
+ *	Return the number of bytes available in the transport buffer.
  */
-extern bool pgtls_read_pending(PGconn *conn);
+extern ssize_t pgtls_bytes_pending(PGconn *conn);
 
 /*
  *	Write data to a secure connection.
@@ -913,6 +911,7 @@ extern PostgresPollingStatusType pqsecure_open_gss(PGconn *conn);
  */
 extern ssize_t pg_GSS_write(PGconn *conn, const void *ptr, size_t len);
 extern ssize_t pg_GSS_read(PGconn *conn, void *ptr, size_t len);
+extern ssize_t pg_GSS_bytes_pending(PGconn *conn);
 #endif
 
 /* === in fe-trace.c === */
@@ -966,7 +965,6 @@ extern char *libpq_ngettext(const char *msgid, const char *msgid_plural, unsigne
 
 extern void libpq_append_error(PQExpBuffer errorMessage, const char *fmt, ...) pg_attribute_printf(2, 3);
 extern void libpq_append_conn_error(PGconn *conn, const char *fmt, ...) pg_attribute_printf(2, 3);
-extern void libpq_append_grease_info(PGconn *conn);
 
 /*
  * These macros are needed to let error-handling code be portable between

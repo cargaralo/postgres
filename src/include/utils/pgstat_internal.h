@@ -215,7 +215,7 @@ typedef struct PgStat_SubXactStatus
 
 	/*
 	 * Tuple insertion/deletion counts for an open transaction can't be
-	 * propagated into PgStat_TableStatus counters until we know if it is
+	 * propagated into PgStat_RelationStatus counters until we know if it is
 	 * going to commit or abort.  Hence, we keep these counts in per-subxact
 	 * structs that live in TopTransactionContext.  This data structure is
 	 * designed on the assumption that subxacts won't usually modify very many
@@ -322,7 +322,8 @@ typedef struct PgStat_KindInfo
 	 * an entry, in the stats file or optionally in a different file.
 	 * Optional.
 	 *
-	 * to_serialized_data: write auxiliary data for an entry.
+	 * to_serialized_data: write auxiliary data for an entry.  Returns true on
+	 * success, false on write error.
 	 *
 	 * from_serialized_data: read auxiliary data for an entry.  Returns true
 	 * on success, false on read error.
@@ -332,7 +333,7 @@ typedef struct PgStat_KindInfo
 	 * just written or read.  "header" is a pointer to the stats data; it may
 	 * be modified only in from_serialized_data to reconstruct an entry.
 	 */
-	void		(*to_serialized_data) (const PgStat_HashKey *key,
+	bool		(*to_serialized_data) (const PgStat_HashKey *key,
 									   const PgStatShared_Common *header,
 									   FILE *statfile);
 	bool		(*from_serialized_data) (const PgStat_HashKey *key,
@@ -507,6 +508,12 @@ typedef struct PgStatShared_Relation
 	PgStat_StatTabEntry stats;
 } PgStatShared_Relation;
 
+typedef struct PgStatShared_Index
+{
+	PgStatShared_Common header;
+	PgStat_StatIdxEntry stats;
+} PgStatShared_Index;
+
 typedef struct PgStatShared_Function
 {
 	PgStatShared_Common header;
@@ -679,6 +686,7 @@ extern void pgstat_assert_is_up(void);
 #endif
 
 extern void pgstat_delete_pending_entry(PgStat_EntryRef *entry_ref);
+extern void pgstat_prep_pending_from_entry_ref(PgStat_EntryRef *entry_ref);
 extern PgStat_EntryRef *pgstat_prep_pending_entry(PgStat_Kind kind, Oid dboid,
 												  uint64 objid,
 												  bool *created_entry);
@@ -705,7 +713,8 @@ extern void pgstat_archiver_snapshot_cb(void);
 /* flags for pgstat_flush_backend() */
 #define PGSTAT_BACKEND_FLUSH_IO		(1 << 0)	/* Flush I/O statistics */
 #define PGSTAT_BACKEND_FLUSH_WAL   (1 << 1) /* Flush WAL statistics */
-#define PGSTAT_BACKEND_FLUSH_ALL   (PGSTAT_BACKEND_FLUSH_IO | PGSTAT_BACKEND_FLUSH_WAL)
+#define PGSTAT_BACKEND_FLUSH_LOCK  (1 << 2) /* Flush lock statistics */
+#define PGSTAT_BACKEND_FLUSH_ALL   (PGSTAT_BACKEND_FLUSH_IO | PGSTAT_BACKEND_FLUSH_WAL | PGSTAT_BACKEND_FLUSH_LOCK)
 
 extern bool pgstat_flush_backend(bool nowait, uint32 flags);
 extern bool pgstat_backend_flush_cb(bool nowait);
@@ -787,6 +796,15 @@ extern void pgstat_relation_reset_timestamp_cb(PgStatShared_Common *header, Time
 
 
 /*
+ * Functions in pgstat_index.c
+ */
+
+extern bool pgstat_index_flush_cb(PgStat_EntryRef *entry_ref, bool nowait);
+extern void pgstat_index_delete_pending_cb(PgStat_EntryRef *entry_ref);
+extern void pgstat_index_reset_timestamp_cb(PgStatShared_Common *header, TimestampTz ts);
+
+
+/*
  * Functions in pgstat_replslot.c
  */
 
@@ -807,7 +825,8 @@ extern PgStat_EntryRef *pgstat_get_entry_ref(PgStat_Kind kind, Oid dboid, uint64
 extern bool pgstat_lock_entry(PgStat_EntryRef *entry_ref, bool nowait);
 extern bool pgstat_lock_entry_shared(PgStat_EntryRef *entry_ref, bool nowait);
 extern void pgstat_unlock_entry(PgStat_EntryRef *entry_ref);
-extern bool pgstat_drop_entry(PgStat_Kind kind, Oid dboid, uint64 objid);
+extern bool pgstat_drop_entry(PgStat_Kind kind, Oid dboid, uint64 objid,
+							  bool missing_ok);
 extern void pgstat_drop_all_entries(void);
 extern void pgstat_drop_matching_entries(bool (*do_drop) (PgStatShared_HashEntry *, Datum),
 										 Datum match_data);
@@ -884,11 +903,6 @@ extern PGDLLIMPORT bool pgstat_report_fixed;
 /* Backend-local stats state */
 extern PGDLLIMPORT PgStat_LocalState pgStatLocal;
 
-/* Helper functions for reading and writing of on-disk stats file */
-extern void pgstat_write_chunk(FILE *fpout, void *ptr, size_t len);
-extern bool pgstat_read_chunk(FILE *fpin, void *ptr, size_t len);
-#define pgstat_read_chunk_s(fpin, ptr) pgstat_read_chunk(fpin, ptr, sizeof(*ptr))
-#define pgstat_write_chunk_s(fpout, ptr) pgstat_write_chunk(fpout, ptr, sizeof(*ptr))
 
 /*
  * Implementation of inline functions declared above.

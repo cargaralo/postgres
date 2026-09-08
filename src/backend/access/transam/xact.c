@@ -1747,8 +1747,7 @@ AtSubCommit_childXids(void)
 				MemoryContextAlloc(TopTransactionContext,
 								   new_maxChildXids * sizeof(TransactionId));
 		else
-			new_childXids = repalloc(s->parent->childXids,
-									 new_maxChildXids * sizeof(TransactionId));
+			new_childXids = repalloc_array(s->parent->childXids, TransactionId, new_maxChildXids);
 
 		s->parent->childXids = new_childXids;
 		s->parent->maxChildXids = new_maxChildXids;
@@ -2514,6 +2513,7 @@ CommitTransaction(void)
 	AtEOXact_Files(true);
 	AtEOXact_ComboCid();
 	AtEOXact_HashTables(true);
+	AtEOXact_RI(true);
 	AtEOXact_PgStat(true, is_parallel_worker);
 	AtEOXact_Snapshot(true, false);
 	AtEOXact_ApplyLauncher(true);
@@ -2809,6 +2809,7 @@ PrepareTransaction(void)
 	AtEOXact_Files(true);
 	AtEOXact_ComboCid();
 	AtEOXact_HashTables(true);
+	AtEOXact_RI(true);
 	/* don't call AtEOXact_PgStat here; we fixed pgstat state above */
 	AtEOXact_Snapshot(true, true);
 	/* we treat PREPARE as ROLLBACK so far as waking workers goes */
@@ -3039,6 +3040,7 @@ AbortTransaction(void)
 		AtEOXact_Files(false);
 		AtEOXact_ComboCid();
 		AtEOXact_HashTables(false);
+		AtEOXact_RI(false);
 		AtEOXact_PgStat(false, is_parallel_worker);
 		AtEOXact_ApplyLauncher(false);
 		AtEOXact_LogicalRepWorkers(false);
@@ -5242,6 +5244,7 @@ CommitSubTransaction(void)
 					  s->parent->subTransactionId);
 	AtEOSubXact_HashTables(true, s->nestingLevel);
 	AtEOSubXact_PgStat(true, s->nestingLevel);
+	AtEOSubXact_RI(true, s->subTransactionId, s->parent->subTransactionId);
 	AtSubCommit_Snapshot(s->nestingLevel);
 
 	/*
@@ -5416,6 +5419,7 @@ AbortSubTransaction(void)
 						  s->parent->subTransactionId);
 		AtEOSubXact_HashTables(false, s->nestingLevel);
 		AtEOSubXact_PgStat(false, s->nestingLevel);
+		AtEOSubXact_RI(false, s->subTransactionId, s->parent->subTransactionId);
 		AtSubAbort_Snapshot(s->nestingLevel);
 	}
 
@@ -5637,7 +5641,7 @@ SerializeTransactionState(Size maxsize, char *start_address)
 		   <= maxsize);
 
 	/* Copy them to our scratch space. */
-	workspace = palloc(nxids * sizeof(TransactionId));
+	workspace = palloc_array(TransactionId, nxids);
 	for (s = CurrentTransactionState; s != NULL; s = s->parent)
 	{
 		if (FullTransactionIdIsValid(s->fullTransactionId))
@@ -6223,10 +6227,10 @@ xact_redo_commit(xl_xact_parsed_commit *parsed,
 		 * If a transaction completion record arrives that has as-yet
 		 * unobserved subtransactions then this will not have been fully
 		 * handled by the call to RecordKnownAssignedTransactionIds() in the
-		 * main recovery loop in xlog.c. So we need to do bookkeeping again to
-		 * cover that case. This is confusing and it is easy to think this
-		 * call is irrelevant, which has happened three times in development
-		 * already. Leave it in.
+		 * main recovery loop in PerformWalRecovery(). So we need to do
+		 * bookkeeping again to cover that case. This is confusing and it is
+		 * easy to think this call is irrelevant, which has happened three
+		 * times in development already. Leave it in.
 		 */
 		RecordKnownAssignedTransactionIds(max_xid);
 
@@ -6361,10 +6365,10 @@ xact_redo_abort(xl_xact_parsed_abort *parsed, TransactionId xid,
 		 * If a transaction completion record arrives that has as-yet
 		 * unobserved subtransactions then this will not have been fully
 		 * handled by the call to RecordKnownAssignedTransactionIds() in the
-		 * main recovery loop in xlog.c. So we need to do bookkeeping again to
-		 * cover that case. This is confusing and it is easy to think this
-		 * call is irrelevant, which has happened three times in development
-		 * already. Leave it in.
+		 * main recovery loop in PerformWalRecovery(). So we need to do
+		 * bookkeeping again to cover that case. This is confusing and it is
+		 * easy to think this call is irrelevant, which has happened three
+		 * times in development already. Leave it in.
 		 */
 		RecordKnownAssignedTransactionIds(max_xid);
 

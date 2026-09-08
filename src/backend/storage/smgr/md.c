@@ -148,8 +148,7 @@ static void mdunlinkfork(RelFileLocatorBackend rlocator, ForkNumber forknum,
 static MdfdVec *mdopenfork(SMgrRelation reln, ForkNumber forknum, int behavior);
 static void register_dirty_segment(SMgrRelation reln, ForkNumber forknum,
 								   MdfdVec *seg);
-static void register_unlink_segment(RelFileLocatorBackend rlocator, ForkNumber forknum,
-									BlockNumber segno);
+static void register_unlink_tombstone(RelFileLocatorBackend rlocator);
 static void register_forget_request(RelFileLocatorBackend rlocator, ForkNumber forknum,
 									BlockNumber segno);
 static void _fdvec_resize(SMgrRelation reln,
@@ -421,7 +420,7 @@ mdunlinkfork(RelFileLocatorBackend rlocator, ForkNumber forknum, bool isRedo)
 
 		/* Register request to unlink first segment later */
 		save_errno = errno;
-		register_unlink_segment(rlocator, forknum, 0 /* first seg */ );
+		register_unlink_tombstone(rlocator);
 		errno = save_errno;
 	}
 
@@ -489,7 +488,7 @@ mdextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		 const void *buffer, bool skipFsync)
 {
 	pgoff_t		seekpos;
-	int			nbytes;
+	ssize_t		nbytes;
 	MdfdVec    *v;
 
 	/* If this build supports direct I/O, the buffer must be I/O aligned. */
@@ -531,9 +530,9 @@ mdextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		/* short write: complain appropriately */
 		ereport(ERROR,
 				(errcode(ERRCODE_DISK_FULL),
-				 errmsg("could not extend file \"%s\": wrote only %d of %d bytes at block %u",
+				 errmsg("could not extend file \"%s\": wrote only %zd of %zu bytes at block %u",
 						FilePathName(v->mdfd_vfd),
-						nbytes, BLCKSZ, blocknum),
+						nbytes, (size_t) BLCKSZ, blocknum),
 				 errhint("Check free disk space.")));
 	}
 
@@ -864,7 +863,7 @@ mdreadv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		struct iovec iov[PG_IOV_MAX];
 		int			iovcnt;
 		pgoff_t		seekpos;
-		int			nbytes;
+		ssize_t		nbytes;
 		MdfdVec    *v;
 		BlockNumber nblocks_this_segment;
 		size_t		transferred_this_segment;
@@ -1081,7 +1080,7 @@ mdwritev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		struct iovec iov[PG_IOV_MAX];
 		int			iovcnt;
 		pgoff_t		seekpos;
-		int			nbytes;
+		ssize_t		nbytes;
 		MdfdVec    *v;
 		BlockNumber nblocks_this_segment;
 		size_t		transferred_this_segment;
@@ -1557,15 +1556,18 @@ register_dirty_segment(SMgrRelation reln, ForkNumber forknum, MdfdVec *seg)
 }
 
 /*
- * register_unlink_segment() -- Schedule a file to be deleted after next checkpoint
+ * register_unlink_tombstone() -- Schedule a tombstone file to be deleted
+ *
+ * A tombstone file is an empty first segment of a relation that has already
+ * been dropped (see mdunlink()).  This function schedules it to be deleted
+ * after the next checkpoint.
  */
 static void
-register_unlink_segment(RelFileLocatorBackend rlocator, ForkNumber forknum,
-						BlockNumber segno)
+register_unlink_tombstone(RelFileLocatorBackend rlocator)
 {
 	FileTag		tag;
 
-	INIT_MD_FILETAG(tag, rlocator.locator, forknum, segno);
+	INIT_MD_FILETAG(tag, rlocator.locator, MAIN_FORKNUM, 0);
 
 	/* Should never be used with temp relations */
 	Assert(!RelFileLocatorBackendIsTemp(rlocator));
@@ -1666,9 +1668,7 @@ _fdvec_resize(SMgrRelation reln,
 		 * FileClose(), and the memory context internally will sometimes avoid
 		 * doing an actual reallocation.
 		 */
-		reln->md_seg_fds[forknum] =
-			repalloc(reln->md_seg_fds[forknum],
-					 sizeof(MdfdVec) * nseg);
+		reln->md_seg_fds[forknum] = repalloc_array(reln->md_seg_fds[forknum], MdfdVec, nseg);
 	}
 	else
 	{
@@ -1957,6 +1957,9 @@ int
 mdunlinkfiletag(const FileTag *ftag, char *path)
 {
 	RelPathStr	p;
+
+	/* We only unlink tombstone files through this mechanism */
+	Assert(ftag->forknum == MAIN_FORKNUM && ftag->segno == 0);
 
 	/* Compute the path. */
 	p = relpathperm(ftag->rlocator, MAIN_FORKNUM);

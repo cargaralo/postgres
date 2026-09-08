@@ -21,7 +21,7 @@ PostgreSQL documentation
 
  <refsynopsisdiv>
 <synopsis>
-ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> SERVER <replaceable>servername</replaceable>
+ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> SERVER <replaceable>server_name</replaceable>
 ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> CONNECTION '<replaceable>conninfo</replaceable>'
 ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> SET PUBLICATION <replaceable class="parameter">publication_name</replaceable> [, ...] [ WITH ( <replaceable class="parameter">publication_option</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] ) ]
 ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> ADD PUBLICATION <replaceable class="parameter">publication_name</replaceable> [, ...] [ WITH ( <replaceable class="parameter">publication_option</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] ) ]
@@ -104,12 +104,12 @@ ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> RENAME TO <
    </varlistentry>
 
    <varlistentry id="sql-altersubscription-params-server">
-    <term><literal>SERVER <replaceable class="parameter">servername</replaceable></literal></term>
+    <term><literal>SERVER <replaceable class="parameter">server_name</replaceable></literal></term>
     <listitem>
      <para>
       This clause replaces the foreign server or connection string originally
       set by <xref linkend="sql-createsubscription"/> with the foreign server
-      <replaceable>servername</replaceable>.
+      <replaceable>server_name</replaceable>.
      </para>
     </listitem>
    </varlistentry>
@@ -237,12 +237,20 @@ ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> RENAME TO <
      <para>
       Re-synchronize sequence data with the publisher. Unlike
       <link linkend="sql-altersubscription-params-refresh-publication">
-      <command>ALTER SUBSCRIPTION ... REFRESH PUBLICATION</command></link> which
-      only has the ability to synchronize newly added sequences,
+      <command>ALTER SUBSCRIPTION ... REFRESH PUBLICATION</command></link>,
+      which synchronizes the subscription's set of sequences with the
+      publication (adding new and removing dropped sequences),
       <literal>REFRESH SEQUENCES</literal> will re-synchronize the sequence
-      data for all currently subscribed sequences. It does not add or remove
-      sequences from the subscription to match the publication.
+      data for all currently subscribed sequences without changing which
+      sequences are subscribed. Run <literal>REFRESH PUBLICATION</literal>
+      first if the publication's set of sequences has changed.
      </para>
+     <note>
+      <para>
+       Sequence replication requires the publisher to be running
+       <productname>PostgreSQL</productname> 19 or later.
+      </para>
+     </note>
      <para>
       See <xref linkend="sequence-definition-mismatches"/> for
       recommendations on how to handle any warnings about sequence definition
@@ -293,8 +301,9 @@ ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> RENAME TO <
       <link linkend="sql-createsubscription-params-with-failover"><literal>failover</literal></link>,
       <link linkend="sql-createsubscription-params-with-two-phase"><literal>two_phase</literal></link>,
       <link linkend="sql-createsubscription-params-with-retain-dead-tuples"><literal>retain_dead_tuples</literal></link>,
-      <link linkend="sql-createsubscription-params-with-max-retention-duration"><literal>max_retention_duration</literal></link>, and
-      <link linkend="sql-createsubscription-params-with-wal-receiver-timeout"><literal>wal_receiver_timeout</literal></link>.
+      <link linkend="sql-createsubscription-params-with-max-retention-duration"><literal>max_retention_duration</literal></link>,
+      <link linkend="sql-createsubscription-params-with-wal-receiver-timeout"><literal>wal_receiver_timeout</literal></link>, and
+      <link linkend="sql-createsubscription-params-with-conflict-log-destination"><literal>conflict_log_destination</literal></link>.
       Only a superuser can set <literal>password_required = false</literal>.
      </para>
 
@@ -351,6 +360,13 @@ ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> RENAME TO <
       has this option enabled, the replication slot named
       <quote><literal>pg_conflict_detection</literal></quote>, created to retain
       dead tuples for conflict detection, will be dropped.
+     </para>
+
+     <para>
+      When the <link linkend="sql-createsubscription-params-with-conflict-log-destination"><literal>conflict_log_destination</literal></link>
+      parameter is set to <literal>table</literal> or <literal>all</literal>, the system
+      automatically creates the conflict log table. Conversely, if the destination is changed to
+      <literal>log</literal>, the conflict log table is automatically dropped.
      </para>
     </listitem>
    </varlistentry>

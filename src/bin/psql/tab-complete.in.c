@@ -816,14 +816,6 @@ static const SchemaQuery Query_for_list_of_partitioned_indexes = {
 	.result = "c.relname",
 };
 
-static const SchemaQuery Query_for_list_of_propgraphs = {
-	.catname = "pg_catalog.pg_class c",
-	.selcondition = "c.relkind IN (" CppAsString2(RELKIND_PROPGRAPH) ")",
-	.viscondition = "pg_catalog.pg_table_is_visible(c.oid)",
-	.namespace = "c.relnamespace",
-	.result = "pg_catalog.quote_ident(c.relname)",
-};
-
 
 /* All relations */
 static const SchemaQuery Query_for_list_of_relations = {
@@ -1209,6 +1201,18 @@ Keywords_for_list_of_owner_roles, "PUBLIC"
 "  FROM pg_catalog.pg_timezone_names() "\
 " WHERE pg_catalog.quote_literal(pg_catalog.lower(name)) LIKE pg_catalog.lower('%s')"
 
+#define Query_for_list_of_publications \
+"SELECT pubname "\
+"  FROM pg_catalog.pg_publication "\
+" WHERE pubname LIKE '%s'"
+
+#define Query_for_list_of_subscriptions \
+"SELECT s.subname "\
+"  FROM pg_catalog.pg_subscription s, pg_catalog.pg_database d"\
+" WHERE s.subname LIKE '%s' "\
+"   AND d.datname = pg_catalog.current_database() "\
+"   AND s.subdbid = d.oid"
+
 /* Privilege options shared between GRANT and REVOKE */
 #define Privilege_options_of_grant_and_revoke \
 "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", \
@@ -1242,32 +1246,6 @@ Copy_common_options, "DEFAULT", "FORCE_NOT_NULL", "FORCE_NULL", "FREEZE", \
 /* COPY TO options */
 #define Copy_to_options \
 Copy_common_options, "FORCE_QUOTE", "FORCE_ARRAY"
-
-/*
- * These object types were introduced later than our support cutoff of
- * server version 9.2.  We use the VersionedQuery infrastructure so that
- * we don't send certain-to-fail queries to older servers.
- */
-
-static const VersionedQuery Query_for_list_of_publications[] = {
-	{100000,
-		" SELECT pubname "
-		"   FROM pg_catalog.pg_publication "
-		"  WHERE pubname LIKE '%s'"
-	},
-	{0, NULL}
-};
-
-static const VersionedQuery Query_for_list_of_subscriptions[] = {
-	{100000,
-		" SELECT s.subname "
-		"   FROM pg_catalog.pg_subscription s, pg_catalog.pg_database d "
-		"  WHERE s.subname LIKE '%s' "
-		"    AND d.datname = pg_catalog.current_database() "
-		"    AND s.subdbid = d.oid"
-	},
-	{0, NULL}
-};
 
  /* Known command-starting keywords. */
 static const char *const sql_commands[] = {
@@ -1345,8 +1323,7 @@ static const pgsql_thing_t words_after_create[] = {
 	{"PARSER", NULL, NULL, &Query_for_list_of_ts_parsers, NULL, THING_NO_SHOW},
 	{"POLICY", NULL, NULL, NULL},
 	{"PROCEDURE", NULL, NULL, Query_for_list_of_procedures},
-	{"PROPERTY GRAPH", NULL, NULL, &Query_for_list_of_propgraphs},
-	{"PUBLICATION", NULL, Query_for_list_of_publications},
+	{"PUBLICATION", Query_for_list_of_publications},
 	{"ROLE", Query_for_list_of_roles},
 	{"ROUTINE", NULL, NULL, &Query_for_list_of_routines, NULL, THING_NO_CREATE},
 	{"RULE", "SELECT rulename FROM pg_catalog.pg_rules WHERE rulename LIKE '%s'"},
@@ -1354,7 +1331,7 @@ static const pgsql_thing_t words_after_create[] = {
 	{"SEQUENCE", NULL, NULL, &Query_for_list_of_sequences},
 	{"SERVER", Query_for_list_of_servers},
 	{"STATISTICS", NULL, NULL, &Query_for_list_of_statistics},
-	{"SUBSCRIPTION", NULL, Query_for_list_of_subscriptions},
+	{"SUBSCRIPTION", Query_for_list_of_subscriptions},
 	{"SYSTEM", NULL, NULL, NULL, NULL, THING_NO_CREATE | THING_NO_DROP},
 	{"TABLE", NULL, NULL, &Query_for_list_of_tables},
 	{"TABLESPACE", Query_for_list_of_tablespaces},
@@ -2032,7 +2009,7 @@ psql_completion(const char *text, int start, int end)
 		 * as desirable interactions hidden in the order of the pattern
 		 * checks.  TODO: think about a better way to manage that.
 		 */
-		for (int tindx = 0; tindx < lengthof(tcpatterns); tindx++)
+		for (size_t tindx = 0; tindx < lengthof(tcpatterns); tindx++)
 		{
 			const TCPattern *tcpat = tcpatterns + tindx;
 			bool		match = false;
@@ -2139,12 +2116,12 @@ psql_completion(const char *text, int start, int end)
 	}
 
 	/* free storage */
-	free(previous_words);
-	free(words_buffer);
-	free(text_copy);
-	free(completion_ref_object);
+	pg_free(previous_words);
+	pg_free(words_buffer);
+	pfree(text_copy);
+	pg_free(completion_ref_object);
 	completion_ref_object = NULL;
-	free(completion_ref_schema);
+	pg_free(completion_ref_schema);
 	completion_ref_schema = NULL;
 
 	/* Return our Grand List O' Matches */
@@ -2368,6 +2345,9 @@ match_previous_words(int pattern_id,
 	/* ALTER SUBSCRIPTION <name> REFRESH */
 	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, MatchAnyN, "REFRESH"))
 		COMPLETE_WITH("PUBLICATION", "SEQUENCES");
+	/* ALTER SUBSCRIPTION <name> REFRESH PUBLICATION */
+	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, MatchAnyN, "REFRESH", "PUBLICATION"))
+		COMPLETE_WITH("WITH (");
 	/* ALTER SUBSCRIPTION <name> REFRESH PUBLICATION WITH ( */
 	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, MatchAnyN, "REFRESH", "PUBLICATION", "WITH", "("))
 		COMPLETE_WITH("copy_data");
@@ -2376,11 +2356,12 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH("(", "PUBLICATION");
 	/* ALTER SUBSCRIPTION <name> SET ( */
 	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, MatchAnyN, "SET", "("))
-		COMPLETE_WITH("binary", "disable_on_error", "failover",
-					  "max_retention_duration", "origin",
+		COMPLETE_WITH("binary", "conflict_log_destination", "disable_on_error",
+					  "failover", "max_retention_duration", "origin",
 					  "password_required", "retain_dead_tuples",
 					  "run_as_owner", "slot_name", "streaming",
-					  "synchronous_commit", "two_phase");
+					  "synchronous_commit", "two_phase",
+					  "wal_receiver_timeout");
 	/* ALTER SUBSCRIPTION <name> SKIP ( */
 	else if (Matches("ALTER", "SUBSCRIPTION", MatchAny, MatchAnyN, "SKIP", "("))
 		COMPLETE_WITH("lsn");
@@ -2771,20 +2752,6 @@ match_previous_words(int pattern_id,
 	else if (Matches("ALTER", "POLICY", MatchAny, "ON", MatchAny, "WITH", "CHECK"))
 		COMPLETE_WITH("(");
 
-	/* ALTER PROPERTY GRAPH */
-	else if (Matches("ALTER", "PROPERTY", "GRAPH"))
-		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_propgraphs);
-	else if (Matches("ALTER", "PROPERTY", "GRAPH", MatchAny))
-		COMPLETE_WITH("ADD", "ALTER", "DROP", "OWNER TO", "RENAME TO", "SET SCHEMA");
-	else if (Matches("ALTER", "PROPERTY", "GRAPH", MatchAny, "ADD|ALTER|DROP"))
-		COMPLETE_WITH("VERTEX", "EDGE");
-	else if (Matches("ALTER", "PROPERTY", "GRAPH", MatchAny, "ADD|DROP", "VERTEX|EDGE"))
-		COMPLETE_WITH("TABLES");
-	else if (HeadMatches("ALTER", "PROPERTY", "GRAPH", MatchAny, "ADD") && TailMatches("EDGE"))
-		COMPLETE_WITH("TABLES");
-	else if (Matches("ALTER", "PROPERTY", "GRAPH", MatchAny, "ALTER", "VERTEX|EDGE"))
-		COMPLETE_WITH("TABLE");
-
 	/* ALTER RULE <name>, add ON */
 	else if (Matches("ALTER", "RULE", MatchAny))
 		COMPLETE_WITH("ON");
@@ -2831,7 +2798,6 @@ match_previous_words(int pattern_id,
 					  "OWNER TO", "SET", "VALIDATE CONSTRAINT",
 					  "REPLICA IDENTITY", "ATTACH PARTITION",
 					  "DETACH PARTITION", "FORCE ROW LEVEL SECURITY",
-					  "SPLIT PARTITION", "MERGE PARTITIONS (",
 					  "OF", "NOT OF");
 	/* ALTER TABLE xxx ADD */
 	else if (Matches("ALTER", "TABLE", MatchAny, "ADD"))
@@ -3094,29 +3060,16 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH("FROM (", "IN (", "WITH (");
 
 	/*
-	 * If we have ALTER TABLE <foo> DETACH|SPLIT PARTITION, provide a list of
+	 * If we have ALTER TABLE <foo> DETACH PARTITION, provide a list of
 	 * partitions of <foo>.
 	 */
-	else if (Matches("ALTER", "TABLE", MatchAny, "DETACH|SPLIT", "PARTITION"))
+	else if (Matches("ALTER", "TABLE", MatchAny, "DETACH", "PARTITION"))
 	{
 		set_completion_reference(prev3_wd);
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_partition_of_table);
 	}
 	else if (Matches("ALTER", "TABLE", MatchAny, "DETACH", "PARTITION", MatchAny))
 		COMPLETE_WITH("CONCURRENTLY", "FINALIZE");
-
-	/* ALTER TABLE <name> SPLIT PARTITION <name> */
-	else if (Matches("ALTER", "TABLE", MatchAny, "SPLIT", "PARTITION", MatchAny))
-		COMPLETE_WITH("INTO ( PARTITION");
-
-	/* ALTER TABLE <name> MERGE PARTITIONS ( */
-	else if (Matches("ALTER", "TABLE", MatchAny, "MERGE", "PARTITIONS", "("))
-	{
-		set_completion_reference(prev4_wd);
-		COMPLETE_WITH_SCHEMA_QUERY(Query_for_partition_of_table);
-	}
-	else if (Matches("ALTER", "TABLE", MatchAny, "MERGE", "PARTITIONS", "(*)"))
-		COMPLETE_WITH("INTO");
 
 	/* ALTER TABLE <name> OF */
 	else if (Matches("ALTER", "TABLE", MatchAny, "OF"))
@@ -3323,7 +3276,7 @@ match_previous_words(int pattern_id,
 					  "FOREIGN DATA WRAPPER", "FOREIGN TABLE",
 					  "FUNCTION", "INDEX", "LANGUAGE", "LARGE OBJECT",
 					  "MATERIALIZED VIEW", "OPERATOR", "POLICY",
-					  "PROCEDURE", "PROCEDURAL LANGUAGE", "PROPERTY GRAPH", "PUBLICATION", "ROLE",
+					  "PROCEDURE", "PROCEDURAL LANGUAGE", "PUBLICATION", "ROLE",
 					  "ROUTINE", "RULE", "SCHEMA", "SEQUENCE", "SERVER",
 					  "STATISTICS", "SUBSCRIPTION", "TABLE",
 					  "TABLESPACE", "TEXT SEARCH", "TRANSFORM FOR",
@@ -3361,8 +3314,6 @@ match_previous_words(int pattern_id,
 	}
 	else if (Matches("COMMENT", "ON", "PROCEDURAL", "LANGUAGE"))
 		COMPLETE_WITH_QUERY(Query_for_list_of_languages);
-	else if (Matches("COMMENT", "ON", "PROPERTY", "GRAPH"))
-		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_propgraphs);
 	else if (Matches("COMMENT", "ON", "RULE", MatchAny))
 		COMPLETE_WITH("ON");
 	else if (Matches("COMMENT", "ON", "RULE", MatchAny, "ON"))
@@ -3722,25 +3673,6 @@ match_previous_words(int pattern_id,
 	else if (Matches("CREATE", "POLICY", MatchAny, "ON", MatchAny, "AS", MatchAny, "USING"))
 		COMPLETE_WITH("(");
 
-/* CREATE PROPERTY GRAPH */
-	else if (Matches("CREATE", "PROPERTY"))
-		COMPLETE_WITH("GRAPH");
-	else if (Matches("CREATE", "PROPERTY", "GRAPH", MatchAny))
-		COMPLETE_WITH("VERTEX");
-	else if (Matches("CREATE", "PROPERTY", "GRAPH", MatchAny, "VERTEX|NODE"))
-		COMPLETE_WITH("TABLES");
-	else if (Matches("CREATE", "PROPERTY", "GRAPH", MatchAny, "VERTEX|NODE", "TABLES"))
-		COMPLETE_WITH("(");
-	else if (Matches("CREATE", "PROPERTY", "GRAPH", MatchAny, "VERTEX|NODE", "TABLES", "("))
-		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_tables);
-	else if (Matches("CREATE", "PROPERTY", "GRAPH", MatchAny, "VERTEX|NODE", "TABLES", "(*)"))
-		COMPLETE_WITH("EDGE");
-	else if (HeadMatches("CREATE", "PROPERTY", "GRAPH") && TailMatches("EDGE|RELATIONSHIP"))
-		COMPLETE_WITH("TABLES");
-	else if (HeadMatches("CREATE", "PROPERTY", "GRAPH") && TailMatches("EDGE|RELATIONSHIP", "TABLES"))
-		COMPLETE_WITH("(");
-	else if (HeadMatches("CREATE", "PROPERTY", "GRAPH") && TailMatches("EDGE|RELATIONSHIP", "TABLES", "("))
-		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_tables);
 
 /* CREATE PUBLICATION */
 	else if (Matches("CREATE", "PUBLICATION", MatchAny))
@@ -3960,12 +3892,13 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH("WITH (");
 	/* Complete "CREATE SUBSCRIPTION <name> ...  WITH ( <opt>" */
 	else if (Matches("CREATE", "SUBSCRIPTION", MatchAnyN, "WITH", "("))
-		COMPLETE_WITH("binary", "connect", "copy_data", "create_slot",
-					  "disable_on_error", "enabled", "failover",
+		COMPLETE_WITH("binary", "conflict_log_destination", "connect", "copy_data",
+					  "create_slot", "disable_on_error", "enabled", "failover",
 					  "max_retention_duration", "origin",
 					  "password_required", "retain_dead_tuples",
 					  "run_as_owner", "slot_name", "streaming",
-					  "synchronous_commit", "two_phase");
+					  "synchronous_commit", "two_phase",
+					  "wal_receiver_timeout");
 
 /* CREATE TRIGGER --- is allowed inside CREATE SCHEMA, so use TailMatches */
 
@@ -4486,12 +4419,6 @@ match_previous_words(int pattern_id,
 	else if (Matches("DROP", "POLICY", MatchAny, "ON", MatchAny))
 		COMPLETE_WITH("CASCADE", "RESTRICT");
 
-	/* DROP PROPERTY GRAPH */
-	else if (Matches("DROP", "PROPERTY"))
-		COMPLETE_WITH("GRAPH");
-	else if (Matches("DROP", "PROPERTY", "GRAPH"))
-		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_propgraphs);
-
 	/* DROP RULE */
 	else if (Matches("DROP", "RULE", MatchAny))
 		COMPLETE_WITH("ON");
@@ -4736,7 +4663,6 @@ match_previous_words(int pattern_id,
 											"LARGE OBJECT",
 											"PARAMETER",
 											"PROCEDURE",
-											"PROPERTY GRAPH",
 											"ROUTINE",
 											"SCHEMA",
 											"SEQUENCE",
@@ -4894,14 +4820,6 @@ match_previous_words(int pattern_id,
 		else
 			COMPLETE_WITH("FROM");
 	}
-
-/* GRAPH_TABLE */
-	else if (TailMatches("GRAPH_TABLE"))
-		COMPLETE_WITH("(");
-	else if (TailMatches("GRAPH_TABLE", "("))
-		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_propgraphs);
-	else if (TailMatches("GRAPH_TABLE", "(", MatchAny))
-		COMPLETE_WITH("MATCH");
 
 /* GROUP BY */
 	else if (TailMatches("FROM", MatchAny, "GROUP"))
@@ -5268,10 +5186,8 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH("TABLE", "COLUMN", "AGGREGATE", "DATABASE", "DOMAIN",
 					  "EVENT TRIGGER", "FOREIGN TABLE", "FUNCTION",
 					  "LARGE OBJECT", "MATERIALIZED VIEW", "LANGUAGE",
-					  "PROPERTY GRAPH", "PUBLICATION", "PROCEDURE", "ROLE", "ROUTINE", "SCHEMA",
+					  "PUBLICATION", "PROCEDURE", "ROLE", "ROUTINE", "SCHEMA",
 					  "SEQUENCE", "SUBSCRIPTION", "TABLESPACE", "TYPE", "VIEW");
-	else if (Matches("SECURITY", "LABEL", "ON", "PROPERTY", "GRAPH"))
-		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_propgraphs);
 	else if (Matches("SECURITY", "LABEL", "ON", MatchAny, MatchAny))
 		COMPLETE_WITH("IS");
 
@@ -5667,7 +5583,7 @@ match_previous_words(int pattern_id,
 	else if (TailMatchesCS("\\dew*"))
 		COMPLETE_WITH_QUERY(Query_for_list_of_fdws);
 	else if (TailMatchesCS("\\df*"))
-		COMPLETE_WITH_VERSIONED_SCHEMA_QUERY(Query_for_list_of_functions);
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_routines);
 	else if (HeadMatchesCS("\\df*"))
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_datatypes);
 
@@ -5699,9 +5615,9 @@ match_previous_words(int pattern_id,
 	else if (TailMatchesCS("\\dP*"))
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_partitioned_relations);
 	else if (TailMatchesCS("\\dRp*"))
-		COMPLETE_WITH_VERSIONED_QUERY(Query_for_list_of_publications);
+		COMPLETE_WITH_QUERY(Query_for_list_of_publications);
 	else if (TailMatchesCS("\\dRs*"))
-		COMPLETE_WITH_VERSIONED_QUERY(Query_for_list_of_subscriptions);
+		COMPLETE_WITH_QUERY(Query_for_list_of_subscriptions);
 	else if (TailMatchesCS("\\ds*"))
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_sequences);
 	else if (TailMatchesCS("\\dt*"))
@@ -5764,8 +5680,6 @@ match_previous_words(int pattern_id,
 			COMPLETE_WITH("OBJECT");
 		else if (TailMatches("CREATE|ALTER|DROP", "MATERIALIZED"))
 			COMPLETE_WITH("VIEW");
-		else if (TailMatches("CREATE|ALTER|DROP", "PROPERTY"))
-			COMPLETE_WITH("GRAPH");
 		else if (TailMatches("CREATE|ALTER|DROP", "TEXT"))
 			COMPLETE_WITH("SEARCH");
 		else if (TailMatches("CREATE|ALTER|DROP", "USER"))
@@ -6249,12 +6163,12 @@ _complete_from_query(const char *simple_query,
 
 		/* Clean up */
 		termPQExpBuffer(&query_buffer);
-		free(schemaname);
-		free(objectname);
-		free(e_object_like);
-		free(e_schemaname);
-		free(e_ref_object);
-		free(e_ref_schema);
+		pg_free(schemaname);
+		pg_free(objectname);
+		pg_free(e_object_like);
+		pg_free(e_schemaname);
+		pg_free(e_ref_object);
+		pg_free(e_ref_schema);
 	}
 
 	/* Return the next result, if any, but not if the query failed */
@@ -6549,8 +6463,8 @@ complete_from_variables(const char *text, const char *prefix, const char *suffix
 	COMPLETE_WITH_LIST_CS((const char *const *) varnames);
 
 	for (i = 0; i < nvars; i++)
-		free(varnames[i]);
-	free(varnames);
+		pg_free(varnames[i]);
+	pg_free(varnames);
 
 	return matches;
 }
@@ -6806,7 +6720,7 @@ make_like_pattern(const char *word)
 	*bptr = '\0';
 
 	result = escape_string(buffer);
-	free(buffer);
+	pg_free(buffer);
 	return result;
 }
 
@@ -7192,7 +7106,7 @@ get_previous_words(int point, char **buffer, int *nwords)
 
 	/* Release parsing input workspace, if we made one above */
 	if (buf != rl_line_buffer)
-		free(buf);
+		pg_free(buf);
 
 	*nwords = words_found;
 	return previous_words;
@@ -7319,7 +7233,7 @@ dequote_file_name(char *fname, int quote_char)
 		strcpy(workspace + 1, fname);
 		unquoted_fname = strtokx(workspace, "", NULL, "'", *completion_charp,
 								 false, true, pset.encoding);
-		free(workspace);
+		pg_free(workspace);
 	}
 	else
 		unquoted_fname = strtokx(fname, "", NULL, "'", *completion_charp,

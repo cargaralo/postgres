@@ -17,6 +17,7 @@
 #include "access/xlogdefs.h"
 #include "lib/ilist.h"
 #include "miscadmin.h"
+#include "storage/buf.h"
 #include "storage/latch.h"
 #include "storage/lock.h"
 #include "storage/pg_sema.h"
@@ -488,16 +489,18 @@ typedef struct PROC_HDR
 	pg_atomic_uint32 clogGroupFirst;
 
 	/*
-	 * Current slot numbers of some auxiliary processes. There can be only one
+	 * Current proc numbers of some auxiliary processes. There can be only one
 	 * of each of these running at a time.
 	 */
-	ProcNumber	walwriterProc;
-	ProcNumber	checkpointerProc;
+	pg_atomic_uint32 walwriterProc;
+	pg_atomic_uint32 checkpointerProc;
+	/* avlauncher is not an aux process, but it is advertised the same way */
+	pg_atomic_uint32 avLauncherProc;
 
 	/* Current shared estimate of appropriate spins_per_delay value */
 	int			spins_per_delay;
-	/* Buffer id of the buffer that Startup process waits for pin on, or -1 */
-	int			startupBufferPinWaitBufId;
+	/* Buffer that Startup process waits for pin on, or InvalidBuffer */
+	Buffer		startupBufferPinWaitBuf;
 } PROC_HDR;
 
 extern PGDLLIMPORT PROC_HDR *ProcGlobal;
@@ -556,8 +559,8 @@ extern void InitProcess(void);
 extern void InitProcessPhase2(void);
 extern void InitAuxiliaryProcess(void);
 
-extern void SetStartupBufferPinWaitBufId(int bufid);
-extern int	GetStartupBufferPinWaitBufId(void);
+extern void SetStartupBufferPinWaitBuf(Buffer buffer);
+extern Buffer GetStartupBufferPinWaitBuf(void);
 
 extern bool HaveNFreeProcs(int n, int *nfree);
 extern void ProcReleaseLocks(bool isCommit);

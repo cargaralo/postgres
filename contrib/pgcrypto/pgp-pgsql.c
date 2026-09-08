@@ -96,7 +96,7 @@ convert_to_utf8(text *src)
 static void
 clear_and_pfree(text *p)
 {
-	px_memset(p, 0, VARSIZE_ANY(p));
+	explicit_bzero(p, VARSIZE_ANY(p));
 	pfree(p);
 }
 
@@ -192,6 +192,8 @@ set_arg(PGP_Context *ctx, char *key, char *val,
 		res = pgp_set_convert_crlf(ctx, atoi(val));
 	else if (strcmp(key, "unicode-mode") == 0)
 		res = pgp_set_unicode_mode(ctx, atoi(val));
+	else if (strcmp(key, "ignore-cipher-failure") == 0)
+		res = pgp_set_ignore_cipher_failure(ctx, atoi(val));
 
 	/*
 	 * The remaining options are for debugging/testing and are therefore not

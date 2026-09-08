@@ -93,8 +93,6 @@ AlterOpFamilyStmt
 AlterOperatorStmt
 AlterOwnerStmt
 AlterPolicyStmt
-AlterPropGraphElementKind
-AlterPropGraphStmt
 AlterPublicationAction
 AlterPublicationStmt
 AlterReplicationSlotCmd
@@ -132,8 +130,8 @@ AppendPath
 AppendPathInput
 AppendRelInfo
 AppendState
-ApplyErrorCallbackArg
 ApplyExecutionData
+ApplyRemoteCtx
 ApplySubXactData
 Archive
 ArchiveCheckConfiguredCB
@@ -386,6 +384,7 @@ CFuncHashTabEntry
 CHAR
 CHECKPOINT
 CHKVAL
+CIEN_context
 CIRCLE
 CMPDAffix
 CONTEXT
@@ -430,7 +429,6 @@ CatalogId
 CatalogIdMapEntry
 CatalogIndexState
 ChangeContext
-ChangeVarNodes_callback
 ChangeVarNodes_context
 ChannelName
 CheckPoint
@@ -515,6 +513,8 @@ ConditionalStack
 ConditionalStackData
 ConfigData
 ConfigVariable
+ConflictLogColumnDef
+ConflictLogDest
 ConflictTupleInfo
 ConflictType
 ConnCacheEntry
@@ -524,6 +524,8 @@ ConnStatusType
 ConnType
 ConnectionStateEnum
 ConnectionTiming
+ConnectionWarning
+ConnectionWarningFilter
 ConsiderSplitContext
 Const
 ConstrCheck
@@ -580,7 +582,6 @@ CreateOpClassStmt
 CreateOpFamilyStmt
 CreatePLangStmt
 CreatePolicyStmt
-CreatePropGraphStmt
 CreatePublicationStmt
 CreateRangeStmt
 CreateReplicationSlotCmd
@@ -647,7 +648,6 @@ DatumTupleFields
 DbInfo
 DbInfoArr
 DbLocaleInfo
-DbOidName
 DdlOptType
 DdlOption
 DeClonePtrType
@@ -723,7 +723,6 @@ ENGINE
 EOM_flatten_into_method
 EOM_get_flat_size_method
 EPQState
-EPlan
 EState
 EStatus
 EVP_CIPHER
@@ -843,7 +842,6 @@ FSMPageData
 FakeRelCacheEntry
 FakeRelCacheEntryData
 FastPathMeta
-FastPathStrongRelationLockData
 FdwInfo
 FdwRoutine
 FetchDirection
@@ -933,11 +931,6 @@ FormData_pg_opfamily
 FormData_pg_partitioned_table
 FormData_pg_policy
 FormData_pg_proc
-FormData_pg_propgraph_element
-FormData_pg_propgraph_element_label
-FormData_pg_propgraph_label
-FormData_pg_propgraph_label_property
-FormData_pg_propgraph_property
 FormData_pg_publication
 FormData_pg_publication_namespace
 FormData_pg_publication_rel
@@ -998,11 +991,6 @@ Form_pg_opfamily
 Form_pg_partitioned_table
 Form_pg_policy
 Form_pg_proc
-Form_pg_propgraph_element
-Form_pg_propgraph_element_label
-Form_pg_propgraph_label
-Form_pg_propgraph_label_property
-Form_pg_propgraph_property
 Form_pg_publication
 Form_pg_publication_namespace
 Form_pg_publication_rel
@@ -1166,12 +1154,6 @@ GrantRoleOptions
 GrantRoleStmt
 GrantStmt
 GrantTargetType
-GraphElementPattern
-GraphElementPatternKind
-GraphLabelRef
-GraphPattern
-GraphPropertyRef
-GraphTableParseState
 Group
 GroupByColInfo
 GroupByOrdering
@@ -1505,7 +1487,10 @@ JsonTablePathScan
 JsonTablePathSpec
 JsonTablePlan
 JsonTablePlanRowSource
+JsonTablePlanSpec
 JsonTablePlanState
+JsonTablePlanJoinType
+JsonTablePlanType
 JsonTableSiblingJoin
 JsonTokenType
 JsonTransformStringValuesAction
@@ -1755,7 +1740,6 @@ MemoizeInstrumentation
 MemoizeKey
 MemoizePath
 MemoizeState
-MemoizeTuple
 MemoryChunk
 MemoryContext
 MemoryContextCallback
@@ -2074,8 +2058,7 @@ PLyObToTuple
 PLyObject_AsString_t
 PLyPlanObject
 PLyProcedure
-PLyProcedureEntry
-PLyProcedureKey
+PLyProcedureCache
 PLyResultObject
 PLySRFState
 PLySavedArgs
@@ -2212,7 +2195,6 @@ PartitionDirectoryEntry
 PartitionDispatch
 PartitionElem
 PartitionHashBound
-PartitionIndexExtDepEntry
 PartitionKey
 PartitionListValue
 PartitionMap
@@ -2320,6 +2302,7 @@ PgStatShared_CustomVarEntry
 PgStatShared_Database
 PgStatShared_Function
 PgStatShared_HashEntry
+PgStatShared_Index
 PgStatShared_IO
 PgStatShared_Lock
 PgStatShared_Relation
@@ -2342,6 +2325,7 @@ PgStat_FunctionCallUsage
 PgStat_FunctionCounts
 PgStat_HashKey
 PgStat_IO
+PgStat_IndexCounts
 PgStat_KindInfo
 PgStat_LocalState
 PgStat_Lock
@@ -2349,6 +2333,7 @@ PgStat_LockEntry
 PgStat_PendingDroppedStatsItem
 PgStat_PendingIO
 PgStat_PendingLock
+PgStat_RelationStatus
 PgStat_SLRUStats
 PgStat_ShmemControl
 PgStat_Snapshot
@@ -2357,13 +2342,13 @@ PgStat_StatCustomFixedEntry
 PgStat_StatCustomVarEntry
 PgStat_StatDBEntry
 PgStat_StatFuncEntry
+PgStat_StatIdxEntry
 PgStat_StatReplSlotEntry
 PgStat_StatSubEntry
 PgStat_StatTabEntry
 PgStat_StatsFileOp
 PgStat_SubXactStatus
 PgStat_TableCounts
-PgStat_TableStatus
 PgStat_TableXactStatus
 PgStat_WalCounters
 PgStat_WalStats
@@ -2445,10 +2430,6 @@ ProjectSetState
 ProjectionInfo
 ProjectionPath
 PromptInterruptContext
-PropGraphEdge
-PropGraphLabelAndProperties
-PropGraphProperties
-PropGraphVertex
 ProtocolVersion
 PrsStorage
 PruneFreezeParams
@@ -2461,6 +2442,7 @@ PsqlScanQuoteType
 PsqlScanResult
 PsqlScanState
 PsqlScanStateData
+PsqlScanStateSave
 PsqlSettings
 Publication
 PublicationActions
@@ -2521,6 +2503,7 @@ RI_CompareHashEntry
 RI_CompareKey
 RI_ConstraintInfo
 RI_FastPathEntry
+RI_FastPathKey
 RI_QueryHashEntry
 RI_QueryKey
 RTEKind
@@ -2533,7 +2516,6 @@ Range
 RangeBound
 RangeBox
 RangeFunction
-RangeGraphTable
 RangeIOData
 RangeQueryClause
 RangeSubselect
@@ -2559,6 +2541,7 @@ ReadBytePtrType
 ReadExtraTocPtrType
 ReadFunc
 ReadLocalXLogPageNoWaitPrivate
+ReadNodeContext
 ReadReplicationSlotCmd
 ReadStream
 ReadStreamBlockNumberCB
@@ -2697,6 +2680,8 @@ ResultState
 ResultType
 RetainDeadTuplesData
 RetainDeadTuplesPhase
+RetrievedObject
+RetrievedObjects
 ReturnSetInfo
 ReturnStmt
 ReturningClause
@@ -2921,7 +2906,6 @@ SimpleStats
 SimpleStringList
 SimpleStringListCell
 SingleBoundSortItem
-SinglePartitionSpec
 Size
 SkipPages
 SkipSupport
@@ -2993,7 +2977,6 @@ SpinDelayStatus
 SplitInterval
 SplitLR
 SplitPageLayout
-SplitPartitionContext
 SplitPoint
 SplitTextOutputData
 SplitVar
@@ -3111,7 +3094,6 @@ TParserStateActionItem
 TQueueDestReceiver
 TRGM
 TSAnyCacheEntry
-TscClockSourceInfo
 TSConfigCacheEntry
 TSConfigInfo
 TSDictInfo
@@ -3178,10 +3160,12 @@ Tcl_Obj
 Tcl_Size
 Tcl_Time
 TempNamespaceStatus
+TestCustomScanState
 TestDSMRegistryHashEntry
 TestDSMRegistryStruct
 TestDecodingData
 TestDecodingTxnData
+TestExtNode
 TestShmemData
 TestSpec
 TestValueType
@@ -3262,6 +3246,7 @@ TriggerInfo
 TriggerInstrumentation
 TriggerTransition
 TruncateStmt
+TscClockSourceInfo
 TsmRoutine
 TupOutputState
 TupSortStatus
@@ -3416,7 +3401,6 @@ WaitEvent
 WaitEventActivity
 WaitEventBuffer
 WaitEventClient
-WaitEventCustomCounterData
 WaitEventCustomEntryByInfo
 WaitEventCustomEntryByName
 WaitEventIO
@@ -3721,6 +3705,7 @@ deparse_context
 deparse_expr_cxt
 deparse_namespace
 derives_hash
+desigidx_type
 dev_t
 disassembledLeaf
 dlist_head
@@ -3842,7 +3827,9 @@ gistxlogPageDelete
 gistxlogPageReuse
 gistxlogPageSplit
 gistxlogPageUpdate
+grouping_eqop_callback
 grouping_sets_data
+grouping_walker_ctx
 growable_trgm_array
 gseg_picksplit_item
 gss_OID_set
@@ -3855,7 +3842,7 @@ gss_key_value_set_desc
 gss_name_t
 gtrgm_consistent_cache
 gzFile
-having_collation_ctx
+having_grouping_ctx
 heap_page_items_state
 help_handler
 hlCheck
@@ -3893,6 +3880,7 @@ int64_t
 int8
 int8_t
 int8x16_t
+int_fast32_2s
 int_fast32_t
 int_fast64_t
 internalPQconninfoOption
@@ -4201,6 +4189,7 @@ pthread_mutex_t
 pthread_once_t
 pthread_t
 ptrdiff_t
+publication_tables_state
 published_rel
 pull_var_clause_context
 pull_varattnos_context
@@ -4422,7 +4411,7 @@ va_list
 vacuumingOptions
 validate_string_relopt
 varatt_expanded
-varatt_external
+varatt_external_oid
 varatt_indirect
 varattrib_1b
 varattrib_1b_e

@@ -617,7 +617,7 @@ SendTimeLineHistory(TimeLineHistoryCmd *cmd)
 	char		path[MAXPGPATH];
 	int			fd;
 	off_t		histfilelen;
-	off_t		bytesleft;
+	size_t		bytesleft;
 	Size		len;
 
 	dest = CreateDestReceiver(DestRemoteSimple);
@@ -661,13 +661,19 @@ SendTimeLineHistory(TimeLineHistoryCmd *cmd)
 				(errcode_for_file_access(),
 				 errmsg("could not seek to beginning of file \"%s\": %m", path)));
 
+	/*
+	 * unlikely in practice, but to document the implicit integer conversion
+	 */
+	if (histfilelen > UINT32_MAX)
+		elog(ERROR, "timeline history file is too large");
+
 	pq_sendint32(&buf, histfilelen);	/* col2 len */
 
 	bytesleft = histfilelen;
 	while (bytesleft > 0)
 	{
 		PGAlignedBlock rbuf;
-		int			nread;
+		ssize_t		nread;
 
 		pgstat_report_wait_start(WAIT_EVENT_WALSENDER_TIMELINE_HISTORY_READ);
 		nread = read(fd, rbuf.data, sizeof(rbuf));
@@ -680,10 +686,20 @@ SendTimeLineHistory(TimeLineHistoryCmd *cmd)
 		else if (nread == 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("could not read file \"%s\": read %d of %zu",
-							path, nread, (Size) bytesleft)));
+					 errmsg("could not read file \"%s\": read %zd of %zu",
+							path, nread, bytesleft)));
+
+		/*
+		 * We could have read more than expected if the file changed
+		 * concurrently.  In that case, only send as much as we expected and
+		 * make sure the loop aborts properly (no wrap of bytesleft).  (This
+		 * isn't possible in practice, because the files are updated by atomic
+		 * renames, but it's a safer programming practice.)
+		 */
+		nread = Min(nread, bytesleft);
 
 		pq_sendbytes(&buf, rbuf.data, nread);
+
 		bytesleft -= nread;
 	}
 
@@ -1104,7 +1120,29 @@ logical_read_xlog_page(XLogReaderState *state, XLogRecPtr targetPagePtr, int req
 	am_cascading_walsender = RecoveryInProgress();
 
 	if (am_cascading_walsender)
-		GetXLogReplayRecPtr(&currTLI);
+	{
+		TimeLineID	insertTLI;
+
+		/*
+		 * If the insertion timeline has already been set, use it.
+		 * InsertTimeLineID is set before the WAL segments of the old timeline
+		 * are removed, before SharedRecoveryState switches to
+		 * RECOVERY_STATE_DONE.
+		 *
+		 * There is a window where RecoveryInProgress() still returns true but
+		 * the old timeline's WAL segments have already been removed or
+		 * recycled.  Using the WAL insertion timeline avoids attempting to
+		 * read from those removed segments, improving availability, and is a
+		 * safe thing to do as promotion copies the contents in the last
+		 * segment of the old timeline to the first segment of the new
+		 * timeline, up to the switchpoint.
+		 */
+		insertTLI = GetWALInsertionTimeLineIfSet();
+		if (insertTLI != 0)
+			currTLI = insertTLI;
+		else
+			GetXLogReplayRecPtr(&currTLI);
+	}
 	else
 		currTLI = GetWALInsertionTimeLine();
 
@@ -1334,7 +1372,9 @@ CreateReplicationSlot(CreateReplicationSlotCmd *cmd)
 		 * logical decoding context.
 		 */
 		EnsureLogicalDecodingEnabled();
-		Assert(IsLogicalDecodingEnabled());
+
+		/* See the comment in create_logical_replication_slot() */
+		Assert(RecoveryInProgress() || IsLogicalDecodingEnabled());
 
 		ctx = CreateInitDecodingContext(cmd->plugin, NIL, need_full_snapshot,
 										false,
@@ -2855,7 +2895,30 @@ ProcessStandbyPSRequestMessage(void)
 	nextFullXid = ReadNextFullTransactionId();
 	fullOldestXidInCommit = FullTransactionIdFromAllowableAt(nextFullXid,
 															 oldestXidInCommit);
-	lsn = GetXLogWriteRecPtr();
+
+	/*
+	 * Report the end of the last inserted WAL record rather than the WAL
+	 * write position.  A transaction that commits asynchronously (with
+	 * synchronous_commit = off) clears DELAY_CHKPT_IN_COMMIT without flushing
+	 * its commit record, so it is visible to neither the in-commit scan above
+	 * nor a write position that has not yet reached its commit record.  The
+	 * subscriber waits until it has applied and flushed up to the reported
+	 * position before advancing its non-removable transaction ID, so the
+	 * reported position must cover every transaction that has already
+	 * committed, as each of those already carries a commit timestamp earlier
+	 * than this reply.  A transaction's commit timestamp is written as part
+	 * of its commit record, so it cannot have committed without that record
+	 * already being at or before the insert position.  A transaction that has
+	 * determined its commit timestamp but not yet inserted the record is
+	 * still in the commit phase, and so is reported by the in-commit scan
+	 * above.
+	 *
+	 * GetXLogInsertEndRecPtr() is used rather than GetXLogInsertRecPtr()
+	 * because the latter can return a position past the page header when the
+	 * last record ends at a page boundary, which can never match a record end
+	 * and would needlessly stall the subscriber's wait.
+	 */
+	lsn = GetXLogInsertEndRecPtr();
 
 	elog(DEBUG2, "sending primary status");
 

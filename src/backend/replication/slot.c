@@ -420,6 +420,8 @@ ReplicationSlotCreate(const char *name, bool db_specific,
 					errmsg("cannot enable failover for a temporary replication slot"));
 	}
 
+	INJECTION_POINT("replication-slot-create-begin", (char *) name);
+
 	/*
 	 * If some other backend ran this code concurrently with us, we'd likely
 	 * both allocate the same slot, and that would be bad.  We'd also be at
@@ -2688,7 +2690,7 @@ RestoreSlotFromDisk(const char *name)
 	char		path[MAXPGPATH + sizeof(PG_REPLSLOT_DIR) + 10];
 	int			fd;
 	bool		restored = false;
-	int			readBytes;
+	ssize_t		readBytes;
 	pg_crc32c	checksum;
 	TimestampTz now = 0;
 
@@ -2748,9 +2750,9 @@ RestoreSlotFromDisk(const char *name)
 		else
 			ereport(PANIC,
 					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("could not read file \"%s\": read %d of %zu",
+					 errmsg("could not read file \"%s\": read %zd of %zu",
 							path, readBytes,
-							(Size) ReplicationSlotOnDiskConstantSize)));
+							ReplicationSlotOnDiskConstantSize)));
 	}
 
 	/* verify magic */
@@ -2789,7 +2791,7 @@ RestoreSlotFromDisk(const char *name)
 		else
 			ereport(PANIC,
 					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("could not read file \"%s\": read %d of %zu",
+					 errmsg("could not read file \"%s\": read %zd of %zu",
 							path, readBytes, (Size) cp.length)));
 	}
 

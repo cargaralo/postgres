@@ -605,7 +605,7 @@ static void CleanupListenersOnExit(void);
 static bool IsListeningOn(const char *channel);
 static void asyncQueueUnregister(void);
 static bool asyncQueueIsFull(void);
-static bool asyncQueueAdvance(volatile QueuePosition *position, int entryLength);
+static bool asyncQueueAdvance(QueuePosition *position, int entryLength);
 static void asyncQueueNotificationToEntry(Notification *n, AsyncQueueEntry *qe);
 static ListCell *asyncQueueAddEntries(ListCell *nextNotify);
 static double asyncQueueUsage(void);
@@ -1109,7 +1109,7 @@ pg_listening_channels(PG_FUNCTION_ARGS)
 			MemoryContext oldcontext;
 
 			oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
-			status = (HASH_SEQ_STATUS *) palloc(sizeof(HASH_SEQ_STATUS));
+			status = palloc_object(HASH_SEQ_STATUS);
 			hash_seq_init(status, localChannelTable);
 			funcctx->user_fctx = status;
 			MemoryContextSwitchTo(oldcontext);
@@ -1968,7 +1968,7 @@ asyncQueueIsFull(void)
  * returns true, else false.
  */
 static bool
-asyncQueueAdvance(volatile QueuePosition *position, int entryLength)
+asyncQueueAdvance(QueuePosition *position, int entryLength)
 {
 	int64		pageno = QUEUE_POS_PAGE(*position);
 	int			offset = QUEUE_POS_OFFSET(*position);

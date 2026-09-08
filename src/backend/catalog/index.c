@@ -717,6 +717,9 @@ UpdateIndexRelation(Oid indexoid,
  *			create a partitioned index (table must be partitioned)
  *		INDEX_CREATE_SUPPRESS_PROGRESS:
  *			don't report progress during the index build.
+ *		INDEX_CREATE_DEFERRABLE:
+ *			index supports a deferrable constraint, mark it as
+ *			non-immediate (indimmediate = false).
  *
  * constr_flags: flags passed to index_constraint_create
  *		(only if INDEX_CREATE_ADD_CONSTRAINT is set)
@@ -725,6 +728,9 @@ UpdateIndexRelation(Oid indexoid,
  * constraintId: if not NULL, receives OID of created constraint
  *
  * Returns the OID of the created index.
+ *
+ * NB: Caller is responsible for ensuring the user has USAGE on all types
+ * indexInfo->ii_{Expressions,Predicate} depend on.
  */
 Oid
 index_create(Relation heapRelation,
@@ -1051,7 +1057,8 @@ index_create(Relation heapRelation,
 						indexInfo,
 						collationIds, opclassIds, coloptions,
 						isprimary, is_exclusion,
-						(constr_flags & INDEX_CONSTR_CREATE_DEFERRABLE) == 0,
+						(constr_flags & INDEX_CONSTR_CREATE_DEFERRABLE) == 0 &&
+						(flags & INDEX_CREATE_DEFERRABLE) == 0,
 						!concurrent && !invalid,
 						!concurrent);
 
@@ -1324,6 +1331,7 @@ index_create_copy(Relation heapRelation, uint16 flags,
 	List	   *indexColNames = NIL;
 	List	   *indexExprs = NIL;
 	List	   *indexPreds = NIL;
+	Form_pg_index indexForm;
 
 	indexRelation = index_open(oldIndexId, RowExclusiveLock);
 
@@ -1343,6 +1351,13 @@ index_create_copy(Relation heapRelation, uint16 flags,
 	indexTuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(oldIndexId));
 	if (!HeapTupleIsValid(indexTuple))
 		elog(ERROR, "cache lookup failed for index %u", oldIndexId);
+
+	indexForm = (Form_pg_index) GETSTRUCT(indexTuple);
+
+	/* Old index is deferrable, do the same for the new index */
+	if (!indexForm->indimmediate)
+		flags |= INDEX_CREATE_DEFERRABLE;
+
 	indclassDatum = SysCacheGetAttrNotNull(INDEXRELID, indexTuple,
 										   Anum_pg_index_indclass);
 	indclass = (oidvector *) DatumGetPointer(indclassDatum);
@@ -1477,7 +1492,7 @@ index_create_copy(Relation heapRelation, uint16 flags,
 							  stattargets,
 							  reloptionsDatum,
 							  flags,
-							  0,
+							  0,	/* constr_flags */
 							  true, /* allow table to be a system catalog? */
 							  false,	/* is_internal? */
 							  NULL);
@@ -2663,9 +2678,21 @@ CompareIndexInfo(const IndexInfo *info1, const IndexInfo *info2,
 			return false;
 	}
 
-	/* No support currently for comparing exclusion indexes. */
-	if (info1->ii_ExclusionOps != NULL || info2->ii_ExclusionOps != NULL)
+	/* If they're exclusion indexes, their properties must be identical */
+	if ((info1->ii_ExclusionOps == NULL) != (info2->ii_ExclusionOps == NULL))
 		return false;
+	if (info1->ii_ExclusionOps != NULL)
+	{
+		for (i = 0; i < info1->ii_NumIndexKeyAttrs; i++)
+		{
+			if (info1->ii_ExclusionOps[i] != info2->ii_ExclusionOps[i])
+				return false;
+			if (info1->ii_ExclusionProcs[i] != info2->ii_ExclusionProcs[i])
+				return false;
+			if (info1->ii_ExclusionStrats[i] != info2->ii_ExclusionStrats[i])
+				return false;
+		}
+	}
 
 	return true;
 }
@@ -2873,7 +2900,8 @@ index_update_stats(Relation rel,
 		{
 			StdRdOptions *options = (StdRdOptions *) rel->rd_options;
 
-			if (options != NULL && !options->autovacuum.enabled)
+			if (options != NULL &&
+				options->autovacuum.enabled == PG_TERNARY_FALSE)
 				update_stats = false;
 		}
 		else
@@ -3637,7 +3665,7 @@ reindex_index(const ReindexStmt *stmt, Oid indexId,
 	int			save_sec_context;
 	int			save_nestlevel;
 	IndexInfo  *indexInfo;
-	volatile bool skipped_constraint = false;
+	bool		skipped_constraint = false;
 	PGRUsage	ru0;
 	bool		progress = ((params->options & REINDEXOPT_REPORT_PROGRESS) != 0);
 	bool		set_tablespace = false;

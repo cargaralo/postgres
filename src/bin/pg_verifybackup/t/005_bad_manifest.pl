@@ -39,6 +39,10 @@ test_parse_error('unexpected manifest version', <<EOM);
 {"PostgreSQL-Backup-Manifest-Version": 9876599}
 EOM
 
+test_parse_error('system identifier in manifest not an integer', <<EOM);
+{"PostgreSQL-Backup-Manifest-Version": 1, "System-Identifier": ""}
+EOM
+
 test_parse_error('unexpected scalar', <<EOM);
 {"PostgreSQL-Backup-Manifest-Version": 1, "Files": true}
 EOM
@@ -76,6 +80,12 @@ EOM
 test_parse_error('file size is not an integer', <<EOM);
 {"PostgreSQL-Backup-Manifest-Version": 1, "Files": [
     {"Path": "x", "Size": "Oops"}
+]}
+EOM
+
+test_parse_error('file size is not an integer', <<EOM);
+{"PostgreSQL-Backup-Manifest-Version": 1, "Files": [
+    {"Path": "x", "Size": ""}
 ]}
 EOM
 
@@ -146,11 +156,31 @@ test_parse_error('timeline is not an integer', <<EOM);
 ]}
 EOM
 
+test_parse_error('timeline is not an integer', <<EOM);
+{"PostgreSQL-Backup-Manifest-Version": 1, "WAL-Ranges": [
+    {"Timeline": "", "Start-LSN": "0/0", "End-LSN": "0/0"}
+]}
+EOM
+
 test_parse_error('could not parse start LSN', <<EOM);
 {"PostgreSQL-Backup-Manifest-Version": 1, "WAL-Ranges": [
     {"Timeline": 1, "Start-LSN": "oops", "End-LSN": "0/0"}
 ]}
 EOM
+
+# An LSN half wider than 32 bits, or trailing garbage, must be rejected rather
+# than silently truncated.
+for my $lsn (
+	'123456789/0', '0/123456789',
+	'FFFFFFFFFFFFFFFFFFFF/0', '1/2garbage',
+	'0/', '/0')
+{
+	test_parse_error('could not parse start LSN', <<EOM);
+{"PostgreSQL-Backup-Manifest-Version": 1, "WAL-Ranges": [
+    {"Timeline": 1, "Start-LSN": "$lsn", "End-LSN": "0/0"}
+]}
+EOM
+}
 
 test_parse_error('could not parse end LSN', <<EOM);
 {"PostgreSQL-Backup-Manifest-Version": 1, "WAL-Ranges": [

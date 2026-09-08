@@ -152,7 +152,7 @@ seg_out(PG_FUNCTION_ARGS)
 		{
 			/* print the upper boundary if exists */
 			p += sprintf(p, " ");
-			if (seg->u_ext == '>' || seg->u_ext == '<' || seg->l_ext == '~')
+			if (seg->u_ext == '>' || seg->u_ext == '<' || seg->u_ext == '~')
 				p += sprintf(p, "%c", seg->u_ext);
 			p += restore(p, seg->upper, seg->u_sigd);
 		}
@@ -345,8 +345,7 @@ gseg_picksplit(PG_FUNCTION_ARGS)
 	/*
 	 * Prepare the auxiliary array and sort it.
 	 */
-	sort_items = (gseg_picksplit_item *)
-		palloc(maxoff * sizeof(gseg_picksplit_item));
+	sort_items = palloc_array(gseg_picksplit_item, maxoff);
 	for (i = 1; i <= maxoff; i++)
 	{
 		seg = DatumGetSegP(entryvec->vector[i].key);
@@ -361,8 +360,8 @@ gseg_picksplit(PG_FUNCTION_ARGS)
 	/* sort items below "firstright" will go into the left side */
 	firstright = maxoff / 2;
 
-	v->spl_left = (OffsetNumber *) palloc(maxoff * sizeof(OffsetNumber));
-	v->spl_right = (OffsetNumber *) palloc(maxoff * sizeof(OffsetNumber));
+	v->spl_left = palloc_array(OffsetNumber, maxoff);
+	v->spl_right = palloc_array(OffsetNumber, maxoff);
 	left = v->spl_left;
 	v->spl_nleft = 0;
 	right = v->spl_right;

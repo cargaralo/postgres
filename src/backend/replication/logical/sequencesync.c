@@ -72,13 +72,14 @@
 #include "utils/syscache.h"
 #include "utils/usercontext.h"
 
-#define REMOTE_SEQ_COL_COUNT 10
+#define REMOTE_SEQ_COL_COUNT 11
 
 typedef enum CopySeqResult
 {
 	COPYSEQ_SUCCESS,
 	COPYSEQ_MISMATCH,
-	COPYSEQ_INSUFFICIENT_PERM,
+	COPYSEQ_SUBSCRIBER_INSUFFICIENT_PERM,
+	COPYSEQ_PUBLISHER_INSUFFICIENT_PERM,
 	COPYSEQ_SKIPPED
 } CopySeqResult;
 
@@ -166,18 +167,22 @@ get_sequences_string(List *seqindexes, StringInfo buf)
  * Report discrepancies found during sequence synchronization between
  * the publisher and subscriber. Emits warnings for:
  * a) mismatched definitions or concurrent rename
- * b) insufficient privileges
- * c) missing sequences on the subscriber
+ * b) insufficient privileges on the subscriber
+ * c) insufficient privileges on the publisher
+ * d) missing sequences on the publisher
  * Then raises an ERROR to indicate synchronization failure.
  */
 static void
-report_sequence_errors(List *mismatched_seqs_idx, List *insuffperm_seqs_idx,
+report_sequence_errors(List *mismatched_seqs_idx,
+					   List *sub_insuffperm_seqs_idx,
+					   List *pub_insuffperm_seqs_idx,
 					   List *missing_seqs_idx)
 {
 	StringInfoData seqstr;
 
 	/* Quick exit if there are no errors to report */
-	if (!mismatched_seqs_idx && !insuffperm_seqs_idx && !missing_seqs_idx)
+	if (!mismatched_seqs_idx && !sub_insuffperm_seqs_idx &&
+		!pub_insuffperm_seqs_idx && !missing_seqs_idx)
 		return;
 
 	initStringInfo(&seqstr);
@@ -193,15 +198,45 @@ report_sequence_errors(List *mismatched_seqs_idx, List *insuffperm_seqs_idx,
 							  seqstr.data));
 	}
 
-	if (insuffperm_seqs_idx)
+	if (sub_insuffperm_seqs_idx)
 	{
-		get_sequences_string(insuffperm_seqs_idx, &seqstr);
+		get_sequences_string(sub_insuffperm_seqs_idx, &seqstr);
+
+		/*
+		 * With run_as_owner enabled, sequence synchronization runs as the
+		 * subscription owner, so a missing UPDATE privilege should be granted
+		 * to that role. Otherwise, the worker switches to the sequence owner
+		 * before checking privileges, so no useful GRANT hint can be
+		 * provided.
+		 */
 		ereport(WARNING,
 				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				errmsg_plural("insufficient privileges on sequence (%s)",
-							  "insufficient privileges on sequences (%s)",
-							  list_length(insuffperm_seqs_idx),
-							  seqstr.data));
+				errmsg_plural("insufficient privileges on subscriber sequence (%s)",
+							  "insufficient privileges on subscriber sequences (%s)",
+							  list_length(sub_insuffperm_seqs_idx),
+							  seqstr.data),
+				MySubscription->runasowner ?
+				errhint_plural("Grant UPDATE on the sequence to the subscription "
+							   "owner on the subscriber.",
+							   "Grant UPDATE on the sequences to the subscription "
+							   "owner on the subscriber.",
+							   list_length(sub_insuffperm_seqs_idx)) : 0);
+	}
+
+	if (pub_insuffperm_seqs_idx)
+	{
+		get_sequences_string(pub_insuffperm_seqs_idx, &seqstr);
+		ereport(WARNING,
+				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				errmsg_plural("insufficient privileges on publisher sequence (%s)",
+							  "insufficient privileges on publisher sequences (%s)",
+							  list_length(pub_insuffperm_seqs_idx),
+							  seqstr.data),
+				errhint_plural("Grant SELECT on the sequence to the role used for "
+							   "the replication connection on the publisher.",
+							   "Grant SELECT on the sequences to the role used for "
+							   "the replication connection on the publisher.",
+							   list_length(pub_insuffperm_seqs_idx)));
 	}
 
 	if (missing_seqs_idx)
@@ -235,6 +270,7 @@ get_and_validate_seq_info(TupleTableSlot *slot, Relation *sequence_rel,
 	bool		isnull;
 	int			col = 0;
 	Datum		datum;
+	bool		remote_has_select_priv;
 	Oid			remote_typid;
 	int64		remote_start;
 	int64		remote_increment;
@@ -254,12 +290,43 @@ get_and_validate_seq_info(TupleTableSlot *slot, Relation *sequence_rel,
 		(LogicalRepSequenceInfo *) list_nth(seqinfos, *seqidx);
 
 	/*
-	 * The sequence data can be NULL due to insufficient privileges or if the
-	 * sequence was dropped concurrently (see pg_get_sequence_data()).
+	 * has_sequence_privilege() itself returns NULL, rather than false, when
+	 * the sequence has been dropped concurrently after it was identified in
+	 * the catalog snapshot (see has_sequence_privilege_id()). Treat that as a
+	 * missing sequence on the publisher.
 	 */
 	datum = slot_getattr(slot, ++col, &isnull);
 	if (isnull)
 		return COPYSEQ_SKIPPED;
+
+	remote_has_select_priv = DatumGetBool(datum);
+
+	/*
+	 * The remote sequence state can be NULL if the publisher lacks the
+	 * required privileges or if the sequence was dropped concurrently after
+	 * it was identified in the catalog snapshot (see pg_get_sequence_data()).
+	 */
+	datum = slot_getattr(slot, ++col, &isnull);
+	if (isnull)
+	{
+		/*
+		 * The sequence was dropped concurrently after it was identified in
+		 * the catalog snapshot. Treat it as skipped (and, since it no longer
+		 * exists on the publisher, ultimately missing).
+		 */
+		if (remote_has_select_priv)
+			return COPYSEQ_SKIPPED;
+
+		/*
+		 * The publisher lacks the SELECT privilege required by
+		 * pg_get_sequence_data(). Since has_sequence_privilege() returned
+		 * false, not NULL, do not classify this sequence as missing on the
+		 * publisher.
+		 */
+		seqinfo_local->found_on_pub = true;
+		return COPYSEQ_PUBLISHER_INSUFFICIENT_PERM;
+	}
+
 	seqinfo_local->last_value = DatumGetInt64(datum);
 
 	seqinfo_local->is_called = DatumGetBool(slot_getattr(slot, ++col, &isnull));
@@ -351,7 +418,7 @@ copy_sequence(LogicalRepSequenceInfo *seqinfo, Oid seqowner)
 		if (!run_as_owner)
 			RestoreUserContext(&ucxt);
 
-		return COPYSEQ_INSUFFICIENT_PERM;
+		return COPYSEQ_SUBSCRIBER_INSUFFICIENT_PERM;
 	}
 
 	/*
@@ -387,10 +454,21 @@ copy_sequences(WalReceiverConn *conn)
 	int			n_seqinfos = list_length(seqinfos);
 	List	   *mismatched_seqs_idx = NIL;
 	List	   *missing_seqs_idx = NIL;
-	List	   *insuffperm_seqs_idx = NIL;
+	List	   *sub_insuffperm_seqs_idx = NIL;
+	List	   *pub_insuffperm_seqs_idx = NIL;
 	StringInfoData seqstr;
 	StringInfoData cmd;
 	MemoryContext oldctx;
+
+	/*
+	 * Sequence synchronization depends on publisher-side functionality
+	 * introduced in PostgreSQL 19, so it cannot work against an older
+	 * publisher.
+	 */
+	if (walrcv_server_version(conn) < 190000)
+		ereport(ERROR,
+				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				errmsg("cannot synchronize sequences if the publisher is running a version earlier than PostgreSQL 19"));
 
 	initStringInfo(&seqstr);
 	initStringInfo(&cmd);
@@ -403,19 +481,21 @@ copy_sequences(WalReceiverConn *conn)
 
 	while (cur_batch_base_index < n_seqinfos)
 	{
-		Oid			seqRow[REMOTE_SEQ_COL_COUNT] = {INT8OID, INT8OID,
+		Oid			seqRow[REMOTE_SEQ_COL_COUNT] = {INT8OID, BOOLOID, INT8OID,
 		BOOLOID, LSNOID, OIDOID, INT8OID, INT8OID, INT8OID, INT8OID, BOOLOID};
 		int			batch_size = 0;
 		int			batch_succeeded_count = 0;
 		int			batch_mismatched_count = 0;
 		int			batch_skipped_count = 0;
-		int			batch_insuffperm_count = 0;
+		int			batch_sub_insuffperm_count = 0;
+		int			batch_pub_insuffperm_count = 0;
 		int			batch_missing_count;
 
 		WalRcvExecResult *res;
 		TupleTableSlot *slot;
 
 		StartTransactionCommand();
+		maybe_reread_subscription();
 
 		for (int idx = cur_batch_base_index; idx < n_seqinfos; idx++)
 		{
@@ -471,7 +551,8 @@ copy_sequences(WalReceiverConn *conn)
 		 * matching.
 		 */
 		appendStringInfo(&cmd,
-						 "SELECT s.seqidx, ps.*, seq.seqtypid,\n"
+						 "SELECT s.seqidx, has_sequence_privilege(c.oid, 'SELECT'),\n"
+						 "       ps.*, seq.seqtypid,\n"
 						 "       seq.seqstart, seq.seqincrement, seq.seqmin,\n"
 						 "       seq.seqmax, seq.seqcycle\n"
 						 "FROM ( VALUES %s ) AS s (schname, seqname, seqidx)\n"
@@ -532,7 +613,7 @@ copy_sequences(WalReceiverConn *conn)
 					MemoryContextSwitchTo(oldctx);
 					batch_mismatched_count++;
 					break;
-				case COPYSEQ_INSUFFICIENT_PERM:
+				case COPYSEQ_SUBSCRIBER_INSUFFICIENT_PERM:
 
 					/*
 					 * Remember sequences with insufficient privileges in a
@@ -540,10 +621,22 @@ copy_sequences(WalReceiverConn *conn)
 					 * after the transaction is committed.
 					 */
 					oldctx = MemoryContextSwitchTo(ApplyContext);
-					insuffperm_seqs_idx = lappend_int(insuffperm_seqs_idx,
-													  seqidx);
+					sub_insuffperm_seqs_idx = lappend_int(sub_insuffperm_seqs_idx,
+														  seqidx);
 					MemoryContextSwitchTo(oldctx);
-					batch_insuffperm_count++;
+					batch_sub_insuffperm_count++;
+					break;
+				case COPYSEQ_PUBLISHER_INSUFFICIENT_PERM:
+
+					/*
+					 * Remember sequences for which the publisher lacks the
+					 * privileges required by pg_get_sequence_data().
+					 */
+					oldctx = MemoryContextSwitchTo(ApplyContext);
+					pub_insuffperm_seqs_idx = lappend_int(pub_insuffperm_seqs_idx,
+														  seqidx);
+					MemoryContextSwitchTo(oldctx);
+					batch_pub_insuffperm_count++;
 					break;
 				case COPYSEQ_SKIPPED:
 
@@ -575,15 +668,16 @@ copy_sequences(WalReceiverConn *conn)
 
 		batch_missing_count = batch_size - (batch_succeeded_count +
 											batch_mismatched_count +
-											batch_insuffperm_count +
+											batch_sub_insuffperm_count +
+											batch_pub_insuffperm_count +
 											batch_skipped_count);
 
 		elog(DEBUG1,
-			 "logical replication sequence synchronization for subscription \"%s\" - batch #%d = %d attempted, %d succeeded, %d mismatched, %d insufficient permission, %d missing from publisher, %d skipped",
+			 "logical replication sequence synchronization for subscription \"%s\" - batch #%d = %d attempted, %d succeeded, %d mismatched, %d subscriber insufficient permission, %d publisher insufficient permission, %d missing from publisher, %d skipped",
 			 MySubscription->name,
 			 (cur_batch_base_index / MAX_SEQUENCES_SYNC_PER_BATCH) + 1,
 			 batch_size, batch_succeeded_count, batch_mismatched_count,
-			 batch_insuffperm_count, batch_missing_count, batch_skipped_count);
+			 batch_sub_insuffperm_count, batch_pub_insuffperm_count, batch_missing_count, batch_skipped_count);
 
 		/* Commit this batch, and prepare for next batch */
 		CommitTransactionCommand();
@@ -610,8 +704,8 @@ copy_sequences(WalReceiverConn *conn)
 	}
 
 	/* Report mismatches, permission issues, or missing sequences */
-	report_sequence_errors(mismatched_seqs_idx, insuffperm_seqs_idx,
-						   missing_seqs_idx);
+	report_sequence_errors(mismatched_seqs_idx, sub_insuffperm_seqs_idx,
+						   pub_insuffperm_seqs_idx, missing_seqs_idx);
 }
 
 /*
@@ -631,6 +725,7 @@ LogicalRepSyncSequences(void)
 	StringInfoData app_name;
 
 	StartTransactionCommand();
+	maybe_reread_subscription();
 
 	rel = table_open(SubscriptionRelRelationId, AccessShareLock);
 
@@ -657,7 +752,16 @@ LogicalRepSyncSequences(void)
 
 		subrel = (Form_pg_subscription_rel) GETSTRUCT(tup);
 
-		sequence_rel = try_table_open(subrel->srrelid, RowExclusiveLock);
+		/*
+		 * Lock the sequence so its identity (namespace and name) cannot
+		 * change under us via a concurrent DROP, RENAME or SET SCHEMA. The
+		 * lock is released immediately rather than at the transaction end.
+		 * The later synchronization does not depend on this captured identity
+		 * remaining valid, as it re-opens the sequence and tolerates
+		 * concurrent changes. Releasing early also avoids holding one lock
+		 * per sequence, which could exhaust the lock table.
+		 */
+		sequence_rel = try_table_open(subrel->srrelid, AccessShareLock);
 
 		/* Skip if sequence was dropped concurrently */
 		if (!sequence_rel)
@@ -666,7 +770,7 @@ LogicalRepSyncSequences(void)
 		/* Skip if the relation is not a sequence */
 		if (sequence_rel->rd_rel->relkind != RELKIND_SEQUENCE)
 		{
-			table_close(sequence_rel, NoLock);
+			table_close(sequence_rel, AccessShareLock);
 			continue;
 		}
 
@@ -684,7 +788,7 @@ LogicalRepSyncSequences(void)
 
 		MemoryContextSwitchTo(oldctx);
 
-		table_close(sequence_rel, NoLock);
+		table_close(sequence_rel, AccessShareLock);
 	}
 
 	/* Cleanup */
@@ -711,7 +815,7 @@ LogicalRepSyncSequences(void)
 	 * Establish the connection to the publisher for sequence synchronization.
 	 */
 	LogRepWorkerWalRcvConn =
-		walrcv_connect(MySubscription->conninfo, true, true,
+		walrcv_connect(MySubscriptionConninfo, true, true,
 					   must_use_password,
 					   app_name.data, &err);
 	if (LogRepWorkerWalRcvConn == NULL)

@@ -210,8 +210,7 @@ dependencies_object_end(void *state)
 
 	/*
 	 * Assign attribute numbers to the attributes array, comparing each one
-	 * against the dependency attribute to ensure that there there are no
-	 * matches.
+	 * against the dependency attribute to ensure that there are no matches.
 	 */
 	for (int i = 0; i < natts; i++)
 	{
@@ -820,7 +819,7 @@ pg_dependencies_out(PG_FUNCTION_ARGS)
 	initStringInfo(&str);
 	appendStringInfoChar(&str, '[');
 
-	for (int i = 0; i < dependencies->ndeps; i++)
+	for (uint32 i = 0; i < dependencies->ndeps; i++)
 	{
 		MVDependency *dependency = dependencies->deps[i];
 

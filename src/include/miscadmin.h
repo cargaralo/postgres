@@ -370,6 +370,10 @@ typedef enum BackendType
 	B_WAL_SUMMARIZER,
 	B_WAL_WRITER,
 
+	/*
+	 * Data checksums processes are dynamic background workers, but they use
+	 * dedicated backend types for pgstat I/O accounting.
+	 */
 	B_DATACHECKSUMSWORKER_LAUNCHER,
 	B_DATACHECKSUMSWORKER_WORKER,
 
@@ -516,7 +520,9 @@ extern void InitPostgres(const char *in_dbname, Oid dboid,
 						 uint32 flags,
 						 char *out_dbname);
 extern void BaseInit(void);
-extern void StoreConnectionWarning(char *msg, char *detail);
+typedef bool (*ConnectionWarningFilter) (void);
+extern void StoreConnectionWarning(char *msg, char *detail,
+								   ConnectionWarningFilter filter);
 
 /* in utils/init/miscinit.c */
 extern PGDLLIMPORT bool IgnoreSystemIndexes;

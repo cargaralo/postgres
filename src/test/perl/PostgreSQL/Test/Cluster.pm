@@ -363,9 +363,8 @@ This tries to connect to the server, to test whether it works or not,,
 so the server is up and running. Otherwise this can return 0 even if
 there's nothing wrong with raw_connect() itself.
 
-Notably, raw_connect() does not work on Unix domain sockets on
-Strawberry perl 5.26.3.1 on Windows, which we use in Cirrus CI images
-as of this writing. It dies with "not implemented on this
+Notably, raw_connect() does not work on Unix domain sockets on at least
+Strawberry perl 5.26.3.1 on Windows. It dies with "not implemented on this
 architecture".
 
 =cut
@@ -1140,6 +1139,12 @@ Start the node and wait until it is ready to accept connections.
 By default, failure terminates the entire F<prove> invocation.  If given,
 instead return a true or false value to indicate success or failure.
 
+=item options => B<string>
+
+Additional postmaster options passed as the value of pg_ctl's C<--options>
+argument. This must be a single string, quoted as needed by the caller.
+Do not specify C<cluster_name>; it is set from the node name.
+
 =back
 
 =cut
@@ -1151,6 +1156,12 @@ sub start
 	my $pgdata = $self->data_dir;
 	my $name = $self->name;
 	my $ret;
+	my $options = "";
+
+	$options .= "$params{options} "
+	  if defined $params{options} && $params{options} ne "";
+
+	$options .= "--cluster-name=$name";
 
 	BAIL_OUT("node \"$name\" is already running") if defined $self->{_pid};
 
@@ -1169,7 +1180,7 @@ sub start
 		'pg_ctl', '--wait',
 		'--pgdata' => $self->data_dir,
 		'--log' => $self->logfile,
-		'--options' => "--cluster-name=$name",
+		'--options' => $options,
 		'start');
 
 	if ($ret != 0)
@@ -2797,8 +2808,10 @@ sub poll_query_until
 
 	# Give up. Print the output from the last attempt, hopefully that's useful
 	# for debugging.
+	my $msg_query = $query;
+	$msg_query = '(connection attempt only)' unless defined $query;
 	diag qq(poll_query_until timed out executing this query:
-$query
+$msg_query
 expecting this output:
 $expected
 last actual query output:

@@ -79,6 +79,18 @@ RangeVarCallbackForPolicy(const RangeVar *rv, Oid relid, Oid oldrelid,
 	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, get_relkind_objtype(get_rel_relkind(relid)), rv->relname);
 
+	/*
+	 * Conflict log tables are used internally for logical replication
+	 * conflict logging and should not be modified directly, as it could
+	 * disrupt conflict logging.
+	 */
+	if (IsConflictLogTableClass(classform))
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("cannot create policy on conflict log table \"%s\"",
+						rv->relname),
+				 errdetail("Conflict log tables are system-managed tables for logical replication conflicts.")));
+
 	/* No system table modifications unless explicitly allowed. */
 	if (!allowSystemTableMods && IsSystemClass(relid, classform))
 		ereport(ERROR,
@@ -151,7 +163,7 @@ policy_role_list_to_array(List *roles, int *num_roles)
 	}
 
 	*num_roles = list_length(roles);
-	role_oids = (Datum *) palloc(*num_roles * sizeof(Datum));
+	role_oids = palloc_array(Datum, *num_roles);
 
 	foreach(cell, roles)
 	{
@@ -724,9 +736,12 @@ CreatePolicy(CreatePolicyStmt *stmt)
 
 	recordDependencyOn(&myself, &target, DEPENDENCY_AUTO);
 
+	CheckUsageOnTypesInExpr(qual, qual_pstate->p_rtable, GetUserId());
 	recordDependencyOnExpr(&myself, qual, qual_pstate->p_rtable,
 						   DEPENDENCY_NORMAL);
 
+	CheckUsageOnTypesInExpr(with_check_qual, with_check_pstate->p_rtable,
+							GetUserId());
 	recordDependencyOnExpr(&myself, with_check_qual,
 						   with_check_pstate->p_rtable, DEPENDENCY_NORMAL);
 
@@ -1055,8 +1070,13 @@ AlterPolicy(AlterPolicyStmt *stmt)
 
 	recordDependencyOn(&myself, &target, DEPENDENCY_AUTO);
 
+	if (stmt->qual)
+		CheckUsageOnTypesInExpr(qual, qual_parse_rtable, GetUserId());
 	recordDependencyOnExpr(&myself, qual, qual_parse_rtable, DEPENDENCY_NORMAL);
 
+	if (stmt->with_check)
+		CheckUsageOnTypesInExpr(with_check_qual, with_check_parse_rtable,
+								GetUserId());
 	recordDependencyOnExpr(&myself, with_check_qual, with_check_parse_rtable,
 						   DEPENDENCY_NORMAL);
 

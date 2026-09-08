@@ -17,6 +17,7 @@
 #include "backup_label.h"
 #include "common/file_perm.h"
 #include "common/logging.h"
+#include "common/pg_parse_lsn.h"
 #include "write_manifest.h"
 
 static int	get_eol_offset(StringInfo buf);
@@ -151,18 +152,19 @@ write_backup_label(char *output_directory, StringInfo buf,
 		if (!line_starts_with(s, e, "INCREMENTAL FROM LSN: ", NULL) &&
 			!line_starts_with(s, e, "INCREMENTAL FROM TLI: ", NULL))
 		{
+			const size_t bytes_left = e - s;
 			ssize_t		wb;
 
-			wb = write(output_fd, s, e - s);
-			if (wb != e - s)
+			wb = write(output_fd, s, bytes_left);
+			if (wb != bytes_left)
 			{
 				if (wb < 0)
 					pg_fatal("could not write file \"%s\": %m", output_filename);
 				else
-					pg_fatal("could not write file \"%s\": wrote %d of %d",
-							 output_filename, (int) wb, (int) (e - s));
+					pg_fatal("could not write file \"%s\": wrote %zd of %zu",
+							 output_filename, wb, bytes_left);
 			}
-			if (pg_checksum_update(&checksum_ctx, (uint8 *) s, e - s) < 0)
+			if (pg_checksum_update(&checksum_ctx, (uint8 *) s, bytes_left) < 0)
 				pg_fatal("could not update checksum of file \"%s\"",
 						 output_filename);
 		}
@@ -233,28 +235,29 @@ line_starts_with(char *s, char *e, char *match, char **sout)
 }
 
 /*
- * Parse an LSN starting at s and not stopping at or before e. The return value
- * is true on success and otherwise false. On success, stores the result into
- * *lsn and sets *c to the first character that is not part of the LSN.
+ * Parse an LSN token starting at s and ending before the next whitespace
+ * character or e. The return value is true on success and otherwise false.
+ * On success, stores the result into *lsn and sets *c to the first character
+ * after the token.
  */
 static bool
 parse_lsn(char *s, char *e, XLogRecPtr *lsn, char **c)
 {
 	char		save = *e;
-	int			nchars;
+	char	   *token_end;
+	char		save_token_end;
 	bool		success;
-	unsigned	hi;
-	unsigned	lo;
 
 	*e = '\0';
-	success = (sscanf(s, "%X/%08X%n", &hi, &lo, &nchars) == 2);
+	token_end = s + strcspn(s, " \t\n\r\f\v");
+	save_token_end = *token_end;
+	*token_end = '\0';
+	success = pg_parse_lsn(s, lsn);
+	*token_end = save_token_end;
 	*e = save;
 
 	if (success)
-	{
-		*lsn = ((XLogRecPtr) hi) << 32 | (XLogRecPtr) lo;
-		*c = s + nchars;
-	}
+		*c = token_end;
 
 	return success;
 }

@@ -424,7 +424,7 @@ gtrgm_consistent(PG_FUNCTION_ARGS)
 					 * So we can apply trigramsMatchGraph despite uncertainty,
 					 * and that usefully improves the quality of the search.
 					 */
-					check = (bool *) palloc(len * sizeof(bool));
+					check = palloc_array(bool, len);
 					for (k = 0; k < len; k++)
 					{
 						CPTRGM(&tmp, ptr + k);
@@ -535,10 +535,9 @@ gtrgm_distance(PG_FUNCTION_ARGS)
 static int32
 unionkey(BITVECP sbase, TRGM *add, int siglen)
 {
-	int32		i;
-
 	if (ISSIGNKEY(add))
 	{
+		int32		i;
 		BITVECP		sadd = GETSIGN(add);
 
 		if (ISALLTRUE(add))
@@ -552,7 +551,7 @@ unionkey(BITVECP sbase, TRGM *add, int siglen)
 		trgm	   *ptr = GETARR(add);
 		int32		tmp = 0;
 
-		for (i = 0; i < ARRNELEM(add); i++)
+		for (unsigned i = 0; i < ARRNELEM(add); i++)
 		{
 			CPTRGM(&tmp, ptr + i);
 			HASH(sbase, tmp, siglen);
@@ -902,7 +901,7 @@ gtrgm_picksplit(PG_FUNCTION_ARGS)
 			else
 				size_alpha = SIGLENBIT(siglen) -
 					sizebitvec((cache[j].allistrue) ? GETSIGN(datum_l) :
-							   GETSIGN(cache[j].sign),
+							   cache[j].sign,
 							   siglen);
 		}
 		else
@@ -915,7 +914,7 @@ gtrgm_picksplit(PG_FUNCTION_ARGS)
 			else
 				size_beta = SIGLENBIT(siglen) -
 					sizebitvec((cache[j].allistrue) ? GETSIGN(datum_r) :
-							   GETSIGN(cache[j].sign),
+							   cache[j].sign,
 							   siglen);
 		}
 		else

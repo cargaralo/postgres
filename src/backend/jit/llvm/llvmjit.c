@@ -530,7 +530,7 @@ llvm_copy_attributes(LLVMValueRef v_from, LLVMValueRef v_to)
 	/* and each function parameter's attribute */
 	param_count = LLVMCountParams(v_from);
 
-	for (int paramidx = 1; paramidx <= param_count; paramidx++)
+	for (uint32 paramidx = 1; paramidx <= param_count; paramidx++)
 		llvm_copy_attributes_at_index(v_from, v_to, paramidx);
 }
 
@@ -1050,9 +1050,6 @@ llvm_create_types(void)
 void
 llvm_split_symbol_name(const char *name, char **modname, char **funcname)
 {
-	*modname = NULL;
-	*funcname = NULL;
-
 	/*
 	 * Module function names are pgextern.$module.$funcname
 	 */
@@ -1062,14 +1059,21 @@ llvm_split_symbol_name(const char *name, char **modname, char **funcname)
 		 * Symbol names cannot contain a ., therefore we can split based on
 		 * first and last occurrence of one.
 		 */
-		*funcname = strrchr(name, '.');
-		(*funcname)++;			/* jump over . */
+		const char *lastdot;
 
-		*modname = pnstrdup(name + strlen("pgextern."),
-							*funcname - name - strlen("pgextern.") - 1);
-		Assert(funcname);
-
-		*funcname = pstrdup(*funcname);
+		name += strlen("pgextern.");
+		lastdot = strrchr(name, '.');
+		if (lastdot)
+		{
+			*modname = pnstrdup(name, lastdot - name);
+			*funcname = pstrdup(lastdot + 1);
+		}
+		else
+		{
+			/* hmm, no second dot? */
+			*modname = NULL;
+			*funcname = pstrdup(name);
+		}
 	}
 	else
 	{
@@ -1134,7 +1138,7 @@ llvm_resolve_symbols(LLVMOrcDefinitionGeneratorRef GeneratorObj, void *Ctx,
 	LLVMErrorRef error;
 	LLVMOrcMaterializationUnitRef mu;
 
-	for (int i = 0; i < LookupSetSize; i++)
+	for (size_t i = 0; i < LookupSetSize; i++)
 	{
 		const char *name = LLVMOrcSymbolStringPoolEntryStr(LookupSet[i].Name);
 

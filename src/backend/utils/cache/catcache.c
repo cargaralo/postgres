@@ -947,7 +947,7 @@ InitCatCache(int id,
 	 */
 	cp = (CatCache *) palloc_aligned(sizeof(CatCache), PG_CACHE_LINE_SIZE,
 									 MCXT_ALLOC_ZERO);
-	cp->cc_bucket = palloc0(nbuckets * sizeof(dlist_head));
+	cp->cc_bucket = palloc0_array(dlist_head, nbuckets);
 
 	/*
 	 * Many catcaches never receive any list searches.  Therefore, we don't
@@ -1091,7 +1091,7 @@ RehashCatCacheLists(CatCache *cp)
  *
  * Call CatalogCacheInitializeCache() if not yet done.
  */
-pg_attribute_always_inline
+pg_always_inline
 static void
 ConditionalCatalogCacheInitializeCache(CatCache *cache)
 {
@@ -1335,6 +1335,8 @@ IndexScanOK(CatCache *cache)
 		case AUTHOID:
 		case AUTHMEMMEMROLE:
 		case DATABASEOID:
+		case PARAMETERACLNAME:
+		case PARAMETERACLOID:
 
 			/*
 			 * Protect authentication lookups occurring before relcache has

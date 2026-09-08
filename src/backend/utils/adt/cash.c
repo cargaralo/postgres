@@ -156,11 +156,29 @@ cash_mul_int64(Cash c, int64 i)
 static inline Cash
 cash_div_int64(Cash c, int64 i)
 {
+	Cash		res;
+
 	if (unlikely(i == 0))
 		ereport(ERROR,
 				(errcode(ERRCODE_DIVISION_BY_ZERO),
 				 errmsg("division by zero")));
 
+	/*
+	 * INT64_MIN / -1 is problematic, since the result can't be represented on
+	 * a two's-complement machine.  Some machines produce INT64_MIN, some
+	 * produce zero, some throw an exception.  We can dodge the problem by
+	 * recognizing that division by -1 is the same as negation.
+	 */
+	if (i == -1)
+	{
+		if (pg_neg_s64_overflow(c, &res))
+			ereport(ERROR,
+					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+					 errmsg("money out of range")));
+		return res;
+	}
+
+	/* No overflow is possible */
 	return c / i;
 }
 
@@ -363,12 +381,11 @@ cash_in(PG_FUNCTION_ARGS)
 	 */
 	if (sgn > 0)
 	{
-		if (value == PG_INT64_MIN)
+		if (pg_neg_s64_overflow(value, &result))
 			ereturn(escontext, (Datum) 0,
 					(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
 					 errmsg("value \"%s\" is out of range for type %s",
 							str, "money")));
-		result = -value;
 	}
 	else
 		result = value;

@@ -72,6 +72,7 @@
 #include "postmaster/syslogger.h"
 #include "postmaster/walsummarizer.h"
 #include "postmaster/walwriter.h"
+#include "replication/logical.h"
 #include "replication/logicallauncher.h"
 #include "replication/slot.h"
 #include "replication/slotsync.h"
@@ -484,13 +485,13 @@ static const struct config_enum_entry wal_compression_options[] = {
 #ifdef USE_ZSTD
 	{"zstd", WAL_COMPRESSION_ZSTD, false},
 #endif
-	{"on", WAL_COMPRESSION_PGLZ, false},
+	{"on", WAL_COMPRESSION_ON, false},
 	{"off", WAL_COMPRESSION_NONE, false},
-	{"true", WAL_COMPRESSION_PGLZ, true},
+	{"true", WAL_COMPRESSION_ON, true},
 	{"false", WAL_COMPRESSION_NONE, true},
-	{"yes", WAL_COMPRESSION_PGLZ, true},
+	{"yes", WAL_COMPRESSION_ON, true},
 	{"no", WAL_COMPRESSION_NONE, true},
-	{"1", WAL_COMPRESSION_PGLZ, true},
+	{"1", WAL_COMPRESSION_ON, true},
 	{"0", WAL_COMPRESSION_NONE, true},
 	{NULL, 0, false}
 };
@@ -571,6 +572,7 @@ int			log_min_duration_statement = -1;
 int			log_parameter_max_length = -1;
 int			log_parameter_max_length_on_error = 0;
 int			log_temp_files = -1;
+int			log_statement_max_length = -1;
 double		log_statement_sample_rate = 1.0;
 double		log_xact_sample_rate = 0;
 char	   *backtrace_functions;
@@ -666,7 +668,6 @@ static bool exec_backend_enabled = EXEC_BACKEND_ENABLED;
 static char *recovery_target_timeline_string;
 static char *recovery_target_string;
 static char *recovery_target_xid_string;
-static char *recovery_target_name_string;
 static char *recovery_target_lsn_string;
 
 /* should be static, but commands/variable.c needs to get at this */

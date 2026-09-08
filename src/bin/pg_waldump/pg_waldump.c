@@ -27,6 +27,7 @@
 #include "common/file_perm.h"
 #include "common/file_utils.h"
 #include "common/logging.h"
+#include "common/pg_parse_lsn.h"
 #include "common/relpath.h"
 #include "getopt_long.h"
 #include "pg_waldump.h"
@@ -236,7 +237,7 @@ search_directory(const char *directory, const char *fname, int *WalSegSz)
 	if (fd >= 0)
 	{
 		PGAlignedXLogBlock buf;
-		int			r;
+		ssize_t		r;
 
 		r = read(fd, buf.data, XLOG_BLCKSZ);
 		if (r == XLOG_BLCKSZ)
@@ -259,8 +260,8 @@ search_directory(const char *directory, const char *fname, int *WalSegSz)
 			pg_fatal("could not read file \"%s\": %m",
 					 fname);
 		else
-			pg_fatal("could not read file \"%s\": read %d of %d",
-					 fname, r, XLOG_BLCKSZ);
+			pg_fatal("could not read file \"%s\": read %zd of %zu",
+					 fname, r, (size_t) XLOG_BLCKSZ);
 		close(fd);
 		return true;
 	}
@@ -430,11 +431,11 @@ WALDumpReadPage(XLogReaderState *state, XLogRecPtr targetPagePtr, int reqLen,
 		if (errinfo.wre_errno != 0)
 		{
 			errno = errinfo.wre_errno;
-			pg_fatal("could not read from file \"%s\", offset %d: %m",
+			pg_fatal("could not read from file \"%s\", offset %u: %m",
 					 fname, errinfo.wre_off);
 		}
 		else
-			pg_fatal("could not read from file \"%s\", offset %d: read %d of %d",
+			pg_fatal("could not read from file \"%s\", offset %u: read %zd of %zu",
 					 fname, errinfo.wre_off, errinfo.wre_read,
 					 errinfo.wre_req);
 	}
@@ -928,8 +929,6 @@ usage(void)
 int
 main(int argc, char **argv)
 {
-	uint32		xlogid;
-	uint32		xrecoff;
 	XLogReaderState *xlogreader_state;
 	XLogDumpPrivate private;
 	XLogDumpConfig config;
@@ -1047,13 +1046,12 @@ main(int argc, char **argv)
 				config.filter_by_extended = true;
 				break;
 			case 'e':
-				if (sscanf(optarg, "%X/%08X", &xlogid, &xrecoff) != 2)
+				if (!pg_parse_lsn(optarg, &private.endptr))
 				{
 					pg_log_error("invalid WAL location: \"%s\"",
 								 optarg);
 					goto bad_argument;
 				}
-				private.endptr = (uint64) xlogid << 32 | xrecoff;
 				break;
 			case 'f':
 				config.follow = true;
@@ -1145,14 +1143,12 @@ main(int argc, char **argv)
 				config.filter_by_extended = true;
 				break;
 			case 's':
-				if (sscanf(optarg, "%X/%08X", &xlogid, &xrecoff) != 2)
+				if (!pg_parse_lsn(optarg, &private.startptr))
 				{
 					pg_log_error("invalid WAL location: \"%s\"",
 								 optarg);
 					goto bad_argument;
 				}
-				else
-					private.startptr = (uint64) xlogid << 32 | xrecoff;
 				break;
 			case 't':
 
@@ -1242,7 +1238,7 @@ main(int argc, char **argv)
 	if (waldir != NULL)
 	{
 		/* Check whether the path looks like a tar archive by its extension */
-		if (parse_tar_compress_algorithm(waldir, &compression))
+		if (parse_tar_compress_algorithm(waldir, &compression) >= 0)
 		{
 			split_path(waldir, &private.archive_dir, &private.archive_name);
 		}
@@ -1286,7 +1282,8 @@ main(int argc, char **argv)
 				pg_fatal("could not open directory \"%s\": %m", waldir);
 		}
 
-		if (fname != NULL && parse_tar_compress_algorithm(fname, &compression))
+		if (fname != NULL &&
+			parse_tar_compress_algorithm(fname, &compression) >= 0)
 		{
 			private.archive_dir = waldir;
 			private.archive_name = fname;

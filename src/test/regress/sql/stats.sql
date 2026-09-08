@@ -14,6 +14,13 @@ SELECT backend_type, object, context FROM pg_stat_io
   ORDER BY backend_type COLLATE "C", object COLLATE "C", context COLLATE "C";
 \a
 
+-- List of registered statistics kinds.
+SELECT id, name, fixed_amount,
+    accessed_across_databases AS across_db, write_to_file
+  FROM pg_stat_kind_info
+  WHERE builtin
+  ORDER BY id;
+
 -- ensure that both seqscan and indexscan plans are allowed
 SET enable_seqscan TO on;
 SET enable_indexscan TO on;
@@ -44,6 +51,7 @@ CREATE TABLE trunc_stats_test1(id serial, stuff text);
 CREATE TABLE trunc_stats_test2(id serial);
 CREATE TABLE trunc_stats_test3(id serial, stuff text);
 CREATE TABLE trunc_stats_test4(id serial);
+CREATE TABLE trunc_stats_test5(id serial);
 
 -- check that n_live_tup is reset to 0 after truncate
 INSERT INTO trunc_stats_test DEFAULT VALUES;
@@ -96,6 +104,15 @@ TRUNCATE trunc_stats_test4;
 INSERT INTO trunc_stats_test4 DEFAULT VALUES;
 ROLLBACK;
 
+-- truncate-only flush: this should count 3 inserts, 1 update and 1 delete.
+INSERT INTO trunc_stats_test5 DEFAULT VALUES;
+INSERT INTO trunc_stats_test5 DEFAULT VALUES;
+INSERT INTO trunc_stats_test5 DEFAULT VALUES;
+UPDATE trunc_stats_test5 SET id = id + 10 WHERE id = 1;
+DELETE FROM trunc_stats_test5 WHERE id = 2;
+SELECT pg_stat_force_next_flush();
+TRUNCATE trunc_stats_test5;
+
 -- do a seqscan
 SELECT count(*) FROM tenk2;
 -- do an indexscan
@@ -115,6 +132,10 @@ SELECT relname, n_tup_ins, n_tup_upd, n_tup_del, n_live_tup, n_dead_tup
   FROM pg_stat_user_tables
  WHERE relname like 'trunc_stats_test%' order by relname;
 
+SELECT relname, n_ins_since_vacuum
+  FROM pg_stat_user_tables
+ WHERE relname = 'trunc_stats_test5';
+
 SELECT st.seq_scan >= pr.seq_scan + 1,
        st.seq_tup_read >= pr.seq_tup_read + cl.reltuples,
        st.idx_scan >= pr.idx_scan + 1,
@@ -131,6 +152,38 @@ SELECT pr.snap_ts < pg_stat_get_snapshot_timestamp() as snapshot_newer
 FROM prevstats AS pr;
 
 COMMIT;
+
+-----
+-- Basic tests for pg_stat_all_indexes
+-----
+CREATE TEMPORARY TABLE test_idx_tup_read AS
+  SELECT g AS a FROM generate_series(1, 200) g;
+CREATE INDEX ON test_idx_tup_read(a);
+
+BEGIN;
+SET LOCAL enable_seqscan TO off;
+
+-- plain index scan
+SET LOCAL enable_bitmapscan TO off;
+EXPLAIN (COSTS off) SELECT count(*) FROM test_idx_tup_read WHERE a BETWEEN 1 AND 200;
+SELECT count(*) FROM test_idx_tup_read WHERE a BETWEEN 1 AND 200;
+-- bitmap index scan
+SET LOCAL enable_indexscan TO off;
+SET LOCAL enable_bitmapscan TO on;
+EXPLAIN (COSTS off) SELECT count(*) FROM test_idx_tup_read WHERE a BETWEEN 1 AND 200;
+SELECT count(*) FROM test_idx_tup_read WHERE a BETWEEN 1 AND 200;
+
+COMMIT;
+
+-- We expect 2 index scans and a total of 400 tuples read (200 from plain
+-- index scan, 200 from bitmap index scan).  However, we only expect 200 tuple
+-- fetches, because bitmap index scans/heap scans don't affect the relevant
+-- counter.
+SELECT pg_stat_force_next_flush();
+SELECT idx_scan, idx_tup_read, idx_tup_fetch FROM pg_stat_all_indexes
+  WHERE indexrelid = 'test_idx_tup_read_a_idx'::regclass;
+
+DROP TABLE test_idx_tup_read;
 
 ----
 -- Basic tests for track_functions
@@ -292,7 +345,7 @@ RELEASE SAVEPOINT sp1;
 COMMIT;
 SELECT pg_stat_get_live_tuples(:drop_stats_test_subxact_oid);
 
-DROP TABLE trunc_stats_test, trunc_stats_test1, trunc_stats_test2, trunc_stats_test3, trunc_stats_test4;
+DROP TABLE trunc_stats_test, trunc_stats_test1, trunc_stats_test2, trunc_stats_test3, trunc_stats_test4, trunc_stats_test5;
 DROP TABLE prevstats;
 
 
@@ -391,7 +444,7 @@ SELECT idx_scan, :'test_last_idx' < last_idx_scan AS idx_ok,
   FROM pg_stat_all_indexes WHERE indexrelid = 'test_last_scan_pkey'::regclass;
 
 -- check that the stats in pg_stat_all_indexes are reset
-SELECT pg_stat_reset_single_table_counters('test_last_scan_pkey'::regclass);
+SELECT pg_stat_reset_single_index_counters('test_last_scan_pkey'::regclass);
 
 SELECT idx_scan, stats_reset IS NOT NULL AS has_stats_reset
   FROM pg_stat_all_indexes WHERE indexrelid = 'test_last_scan_pkey'::regclass;
@@ -612,40 +665,40 @@ CREATE index stats_test_idx1 on stats_test_tab1(a);
 SELECT 'stats_test_idx1'::regclass::oid AS stats_test_idx1_oid \gset
 SET enable_seqscan TO off;
 select a from stats_test_tab1 where a = 3;
-SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+SELECT pg_stat_have_stats('index', :dboid, :stats_test_idx1_oid);
 
 -- pg_stat_have_stats returns false for dropped index with stats
-SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+SELECT pg_stat_have_stats('index', :dboid, :stats_test_idx1_oid);
 DROP index stats_test_idx1;
-SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+SELECT pg_stat_have_stats('index', :dboid, :stats_test_idx1_oid);
 
 -- pg_stat_have_stats returns false for rolled back index creation
 BEGIN;
 CREATE index stats_test_idx1 on stats_test_tab1(a);
 SELECT 'stats_test_idx1'::regclass::oid AS stats_test_idx1_oid \gset
 select a from stats_test_tab1 where a = 3;
-SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+SELECT pg_stat_have_stats('index', :dboid, :stats_test_idx1_oid);
 ROLLBACK;
-SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+SELECT pg_stat_have_stats('index', :dboid, :stats_test_idx1_oid);
 
 -- pg_stat_have_stats returns true for reindex CONCURRENTLY
 CREATE index stats_test_idx1 on stats_test_tab1(a);
 SELECT 'stats_test_idx1'::regclass::oid AS stats_test_idx1_oid \gset
 select a from stats_test_tab1 where a = 3;
-SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+SELECT pg_stat_have_stats('index', :dboid, :stats_test_idx1_oid);
 REINDEX index CONCURRENTLY stats_test_idx1;
 -- false for previous oid
-SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+SELECT pg_stat_have_stats('index', :dboid, :stats_test_idx1_oid);
 -- true for new oid
 SELECT 'stats_test_idx1'::regclass::oid AS stats_test_idx1_oid \gset
-SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+SELECT pg_stat_have_stats('index', :dboid, :stats_test_idx1_oid);
 
 -- pg_stat_have_stats returns true for a rolled back drop index with stats
 BEGIN;
-SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+SELECT pg_stat_have_stats('index', :dboid, :stats_test_idx1_oid);
 DROP index stats_test_idx1;
 ROLLBACK;
-SELECT pg_stat_have_stats('relation', :dboid, :stats_test_idx1_oid);
+SELECT pg_stat_have_stats('index', :dboid, :stats_test_idx1_oid);
 
 -- put enable_seqscan back to on
 SET enable_seqscan TO on;
@@ -998,6 +1051,11 @@ $$;
 
 SELECT fastpath_exceeded AS fastpath_exceeded_before FROM pg_stat_lock WHERE locktype = 'relation' \gset
 
+-- Test pg_stat_get_backend_lock()
+SELECT fastpath_exceeded AS backend_fastpath_exceeded_before
+  FROM pg_stat_get_backend_lock(pg_backend_pid())
+  WHERE locktype = 'relation' \gset
+
 -- Needs a lock on each partition
 SELECT count(*) FROM part_test;
 
@@ -1005,6 +1063,10 @@ SELECT count(*) FROM part_test;
 SELECT pg_stat_force_next_flush();
 
 SELECT fastpath_exceeded > :fastpath_exceeded_before FROM pg_stat_lock WHERE locktype = 'relation';
+
+SELECT fastpath_exceeded > :backend_fastpath_exceeded_before
+  FROM pg_stat_get_backend_lock(pg_backend_pid())
+  WHERE locktype = 'relation';
 
 DROP TABLE part_test;
 

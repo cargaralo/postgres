@@ -30,6 +30,7 @@
 #include "access/xlog_internal.h"
 #include "common/file_perm.h"
 #include "common/logging.h"
+#include "common/pg_parse_lsn.h"
 #include "fe_utils/option_utils.h"
 #include "getopt_long.h"
 #include "libpq-fe.h"
@@ -331,7 +332,7 @@ FindStreamingStart(uint32 *tli)
 			char		buf[4];
 			int			bytes_out;
 			char		fullpath[MAXPGPATH * 2];
-			int			r;
+			ssize_t		r;
 
 			snprintf(fullpath, sizeof(fullpath), "%s/%s", basedir, dirent->d_name);
 
@@ -349,7 +350,7 @@ FindStreamingStart(uint32 *tli)
 					pg_fatal("could not read compressed file \"%s\": %m",
 							 fullpath);
 				else
-					pg_fatal("could not read compressed file \"%s\": read %d of %zu",
+					pg_fatal("could not read compressed file \"%s\": read %zd of %zu",
 							 fullpath, r, sizeof(buf));
 			}
 
@@ -651,8 +652,6 @@ main(int argc, char **argv)
 	int			c;
 	int			option_index;
 	char	   *db_name;
-	uint32		hi,
-				lo;
 	pg_compress_specification compression_spec;
 	char	   *compression_detail = NULL;
 	char	   *compression_algorithm_str = "none";
@@ -689,9 +688,8 @@ main(int argc, char **argv)
 				basedir = pg_strdup(optarg);
 				break;
 			case 'E':
-				if (sscanf(optarg, "%X/%08X", &hi, &lo) != 2)
+				if (!pg_parse_lsn(optarg, &endpos))
 					pg_fatal("could not parse end position \"%s\"", optarg);
-				endpos = ((uint64) hi) << 32 | lo;
 				break;
 			case 'h':
 				dbhost = pg_strdup(optarg);

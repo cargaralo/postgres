@@ -365,6 +365,49 @@ SELECT relpages, reltuples, relallvisible, relallfrozen
 FROM pg_class
 WHERE oid = 'stats_import.test'::regclass;
 
+-- error: reltuples must be finite (rejected with WARNING, returns false)
+SELECT pg_restore_relation_stats(
+        'schemaname', 'stats_import',
+        'relname', 'test',
+        'reltuples', 'Infinity'::real);
+
+SELECT pg_restore_relation_stats(
+        'schemaname', 'stats_import',
+        'relname', 'test',
+        'reltuples', '-Infinity'::real);
+
+SELECT pg_restore_relation_stats(
+        'schemaname', 'stats_import',
+        'relname', 'test',
+        'reltuples', 'NaN'::real);
+
+-- error: reltuples must not be less than -1.0 (rejected with WARNING, returns false)
+SELECT pg_restore_relation_stats(
+        'schemaname', 'stats_import',
+        'relname', 'test',
+        'reltuples', '-5'::real);
+
+-- reltuples is unchanged (still 500) after the rejected values above
+SELECT relpages, reltuples, relallvisible, relallfrozen
+FROM pg_class
+WHERE oid = 'stats_import.test'::regclass;
+
+-- ok: -1 (the "unknown" sentinel) is still accepted
+SELECT pg_restore_relation_stats(
+        'schemaname', 'stats_import',
+        'relname', 'test',
+        'reltuples', '-1'::real);
+
+SELECT relpages, reltuples, relallvisible, relallfrozen
+FROM pg_class
+WHERE oid = 'stats_import.test'::regclass;
+
+-- restore reltuples to 500 for the following tests
+SELECT pg_restore_relation_stats(
+        'schemaname', 'stats_import',
+        'relname', 'test',
+        'reltuples', '500'::real);
+
 -- ok: set just relallvisible, rest stay same
 SELECT pg_restore_relation_stats(
         'schemaname', 'stats_import',
@@ -885,6 +928,24 @@ AND tablename = 'test'
 AND inherited = false
 AND attname = 'arange';
 
+-- warn: range bounds histogram with unsorted elements
+SELECT pg_catalog.pg_restore_attribute_stats(
+    'schemaname', 'stats_import',
+    'relname', 'test',
+    'attname', 'arange',
+    'inherited', false::boolean,
+    'range_bounds_histogram', '{"[50,60)","[1,2)","[90,100)","[5,6)"}'::text
+    );
+
+-- warn: range bounds histogram with empty range
+SELECT pg_catalog.pg_restore_attribute_stats(
+    'schemaname', 'stats_import',
+    'relname', 'test',
+    'attname', 'arange',
+    'inherited', false::boolean,
+    'range_bounds_histogram', '{empty,"[1,2)","[3,4)"}'::text
+    );
+
 -- warn: cannot set most_common_elems for range type, rest ok
 SELECT pg_catalog.pg_restore_attribute_stats(
     'schemaname', 'stats_import',
@@ -996,12 +1057,26 @@ VALUES
   (2, 'red', '{[11,13),[15,19),[20,30)}'::int4multirange),
   (3, 'red', '{[21,23),[25,29),[120,130)}'::int4multirange);
 
--- ensure that we set attribute stats for a multirange
+-- warn: reject range values as ordinary multirange statistics
 SELECT pg_catalog.pg_restore_attribute_stats(
   'schemaname', 'stats_import',
   'relname', 'test_mr',
   'attname', 'mrange',
   'inherited', false,
+  'most_common_vals', ARRAY['[1,3)']::text,
+  'most_common_freqs', ARRAY[1.0]::real[]
+);
+
+-- ensure that we set attribute stats for a multirange
+-- MCVs and histograms retain the multirange type.
+SELECT pg_catalog.pg_restore_attribute_stats(
+  'schemaname', 'stats_import',
+  'relname', 'test_mr',
+  'attname', 'mrange',
+  'inherited', false,
+  'most_common_vals', ARRAY['{[1,3),[5,9)}', '{[11,13),[15,19)}']::text,
+  'most_common_freqs', ARRAY[0.6, 0.4]::real[],
+  'histogram_bounds', ARRAY['{[1,3)}', '{[11,13)}', '{[21,23)}']::text,
   'range_length_histogram', '{19,29,109}'::text,
   'range_empty_frac', '0'::real,
   'range_bounds_histogram', '{"[1,30)","[11,30)","[21,130)"}'::text
@@ -1131,6 +1206,102 @@ WHERE schemaname = 'stats_import'
 AND tablename = 'test'
 AND inherited = false
 AND attname = 'arange';
+
+-- Tests for pg_clear_attribute_stats()
+-- Invalid argument values.
+SELECT pg_catalog.pg_clear_attribute_stats(
+    schemaname => NULL,
+    relname => 'test',
+    attname => 'arange',
+    inherited => false);
+SELECT pg_catalog.pg_clear_attribute_stats(
+    schemaname => 'stats_import',
+    relname => NULL,
+    attname => 'arange',
+    inherited => false);
+SELECT pg_catalog.pg_clear_attribute_stats(
+    schemaname => 'stats_import',
+    relname => 'test',
+    attname => NULL,
+    inherited => false);
+SELECT pg_catalog.pg_clear_attribute_stats(
+    schemaname => 'stats_import',
+    relname => 'test',
+    attname => 'arange',
+    inherited => NULL);
+-- Missing objects
+SELECT pg_catalog.pg_clear_attribute_stats(
+    schemaname => 'schema_not_exist',
+    relname => 'test',
+    attname => 'arange',
+    inherited => false);
+SELECT pg_catalog.pg_clear_attribute_stats(
+    schemaname => 'stats_import',
+    relname => 'table_not_exist',
+    attname => 'arange',
+    inherited => false);
+SELECT pg_catalog.pg_clear_attribute_stats(
+    schemaname => 'stats_import',
+    relname => 'test',
+    attname => 'att_not_exist',
+    inherited => false);
+-- error: system column
+SELECT pg_catalog.pg_clear_attribute_stats(
+    schemaname => 'stats_import',
+    relname => 'test',
+    attname => 'ctid',
+    inherited => false);
+-- error: relkinds
+SELECT pg_catalog.pg_clear_attribute_stats(
+    schemaname => 'stats_import',
+    relname => 'testseq',
+    attname => 'last_value',
+    inherited => false);
+SELECT pg_catalog.pg_clear_attribute_stats(
+    schemaname => 'stats_import',
+    relname => 'testview',
+    attname => 'id',
+    inherited => false);
+
+-- Inherited stats are held in separate pg_statistic rows, and only the
+-- rows matching the inherited argument are removed.  Plant one of each
+-- for the same column, clear the inherited one, and check that the
+-- non-inherited one survives.
+SELECT pg_catalog.pg_restore_attribute_stats(
+    'schemaname', 'stats_import',
+    'relname', 'test',
+    'attname', 'arange',
+    'inherited', false::boolean,
+    'null_frac', 0.5::real);
+SELECT pg_catalog.pg_restore_attribute_stats(
+    'schemaname', 'stats_import',
+    'relname', 'test',
+    'attname', 'arange',
+    'inherited', true::boolean,
+    'null_frac', 0.5::real);
+SELECT inherited, count(*)
+  FROM pg_stats
+  WHERE schemaname = 'stats_import'
+    AND tablename = 'test'
+    AND attname = 'arange'
+    GROUP BY inherited ORDER BY inherited;
+SELECT pg_catalog.pg_clear_attribute_stats(
+    schemaname => 'stats_import',
+    relname => 'test',
+    attname => 'arange',
+    inherited => true);
+SELECT inherited, count(*)
+  FROM pg_stats
+  WHERE schemaname = 'stats_import'
+    AND tablename = 'test'
+    AND attname = 'arange'
+    GROUP BY inherited ORDER BY inherited;
+-- Clean up the non-inherited row planted above.
+SELECT pg_catalog.pg_clear_attribute_stats(
+    schemaname => 'stats_import',
+    relname => 'test',
+    attname => 'arange',
+    inherited => false);
 
 -- temp tables
 CREATE TEMP TABLE stats_temp(i int);
@@ -1612,6 +1783,20 @@ SELECT pg_catalog.pg_restore_extended_stats(
   'most_common_freqs', '{0.25,0.25,0.25,0.25}'::double precision[],
   'most_common_base_freqs', '{0.00390625,0.015625,0.00390625,0.015625}'::double precision[]);
 
+-- warn: more MCV items than can be handled.
+SELECT pg_catalog.pg_restore_extended_stats(
+  'schemaname', 'stats_import',
+  'relname', 'test',
+  'statistics_schemaname', 'stats_import',
+  'statistics_name', 'test_stat_mcv',
+  'inherited', false,
+  'most_common_vals', (SELECT array_agg(ARRAY[g::text, g::text])
+                       FROM generate_series(1, 10001) g),
+  'most_common_freqs', (SELECT array_agg((1.0 / 10001)::double precision)
+                        FROM generate_series(1, 10001) g),
+  'most_common_base_freqs', (SELECT array_agg((1.0 / 10001)::double precision)
+                             FROM generate_series(1, 10001) g));
+
 -- ok: mcv
 SELECT pg_catalog.pg_restore_extended_stats(
   'schemaname', 'stats_import',
@@ -1682,6 +1867,22 @@ SELECT pg_catalog.pg_restore_extended_stats(
   'statistics_name', 'test_mr_stat',
   'inherited', false,
   'exprs', '[{"range_bounds_histogram": "{\"[1,10200)\"}", "range_length_histogram": "{10179}"}]'::jsonb);
+-- warn: range bounds histogram with unsorted elements
+SELECT pg_catalog.pg_restore_extended_stats(
+  'schemaname', 'stats_import',
+  'relname', 'test_mr',
+  'statistics_schemaname', 'stats_import',
+  'statistics_name', 'test_mr_stat',
+  'inherited', false,
+  'exprs', '[{"range_length_histogram": "{10179,10189,10199}", "range_empty_frac": "0", "range_bounds_histogram": "{\"[50,60)\",\"[1,2)\",\"[90,100)\"}"}]'::jsonb);
+-- warn: range bounds histogram with empty range
+SELECT pg_catalog.pg_restore_extended_stats(
+  'schemaname', 'stats_import',
+  'relname', 'test_mr',
+  'statistics_schemaname', 'stats_import',
+  'statistics_name', 'test_mr_stat',
+  'inherited', false,
+  'exprs', '[{"range_length_histogram": "{10179,10189,10199}", "range_empty_frac": "0", "range_bounds_histogram": "{empty,\"[1,2)\",\"[3,4)\"}"}]'::jsonb);
 
 -- ok: multirange stats
 SELECT pg_catalog.pg_restore_extended_stats(

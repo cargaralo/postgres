@@ -366,7 +366,7 @@ CreateTupleDescCopyConstr(TupleDesc tupdesc)
 
 		if ((cpy->num_defval = constr->num_defval) > 0)
 		{
-			cpy->defval = (AttrDefault *) palloc(cpy->num_defval * sizeof(AttrDefault));
+			cpy->defval = palloc_array(AttrDefault, cpy->num_defval);
 			memcpy(cpy->defval, constr->defval, cpy->num_defval * sizeof(AttrDefault));
 			for (i = cpy->num_defval - 1; i >= 0; i--)
 				cpy->defval[i].adbin = pstrdup(constr->defval[i].adbin);
@@ -374,7 +374,7 @@ CreateTupleDescCopyConstr(TupleDesc tupdesc)
 
 		if (constr->missing)
 		{
-			cpy->missing = (AttrMissing *) palloc(tupdesc->natts * sizeof(AttrMissing));
+			cpy->missing = palloc_array(AttrMissing, tupdesc->natts);
 			memcpy(cpy->missing, constr->missing, tupdesc->natts * sizeof(AttrMissing));
 			for (i = tupdesc->natts - 1; i >= 0; i--)
 			{
@@ -391,7 +391,7 @@ CreateTupleDescCopyConstr(TupleDesc tupdesc)
 
 		if ((cpy->num_check = constr->num_check) > 0)
 		{
-			cpy->check = (ConstrCheck *) palloc(cpy->num_check * sizeof(ConstrCheck));
+			cpy->check = palloc_array(ConstrCheck, cpy->num_check);
 			memcpy(cpy->check, constr->check, cpy->num_check * sizeof(ConstrCheck));
 			for (i = cpy->num_check - 1; i >= 0; i--)
 			{
@@ -517,6 +517,7 @@ TupleDescFinalize(TupleDesc tupdesc)
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
 		CompactAttribute *cattr = TupleDescCompactAttr(tupdesc, i);
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
 
 		/*
 		 * Find the highest attnum which is guaranteed to exist in all tuples
@@ -525,10 +526,18 @@ TupleDescFinalize(TupleDesc tupdesc)
 		 */
 		if (firstNonGuaranteedAttr == tupdesc->natts &&
 			(cattr->attnullability != ATTNULLABLE_VALID || !cattr->attbyval ||
-			 cattr->atthasmissing || cattr->attisdropped || cattr->attlen <= 0))
+			 cattr->atthasmissing || cattr->attisdropped ||
+			 cattr->attlen <= 0 ||
+			 attr->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL))
 			firstNonGuaranteedAttr = i;
 
-		if (cattr->attlen <= 0)
+		/*
+		 * Don't cache offsets beyond fixed-width attributes.  Virtual
+		 * generated attributes are stored as NULLs in the tuple, so we don't
+		 * cache offsets beyond these.
+		 */
+		if (cattr->attlen <= 0 ||
+			attr->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
 			break;
 
 		off = att_nominal_alignby(off, cattr->attalignby);

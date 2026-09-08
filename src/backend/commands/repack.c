@@ -48,6 +48,7 @@
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_am.h"
+#include "catalog/pg_attrdef.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/toasting.h"
@@ -62,6 +63,7 @@
 #include "libpq/pqmq.h"
 #include "miscadmin.h"
 #include "optimizer/optimizer.h"
+#include "parser/parse_relation.h"
 #include "pgstat.h"
 #include "replication/logicalrelation.h"
 #include "storage/bufmgr.h"
@@ -167,11 +169,12 @@ static void copy_table_data(Relation NewHeap, Relation OldHeap, Relation OldInde
 							MultiXactId *pCutoffMulti);
 static List *get_tables_to_repack(RepackCommand cmd, bool usingindex,
 								  MemoryContext permcxt);
-static List *get_tables_to_repack_partitioned(RepackCommand cmd,
-											  Oid relid, bool rel_is_index,
+static List *get_tables_to_repack_partitioned(RepackStmt *stmt,
+											  Relation rel,
 											  MemoryContext permcxt);
 static bool repack_is_permitted_for_relation(RepackCommand cmd,
-											 Oid relid, Oid userid);
+											 Oid relid, Oid userid,
+											 bool already_locked);
 
 static void apply_concurrent_changes(BufFile *file, ChangeContext *chgcxt);
 static void apply_concurrent_insert(Relation rel, TupleTableSlot *slot,
@@ -204,6 +207,7 @@ static void rebuild_relation_finish_concurrent(Relation NewHeap, Relation OldHea
 static List *build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes);
 static void copy_index_constraints(Relation old_index, Oid new_index_id,
 								   Oid new_heap_id);
+static void copy_attribute_defaults(Oid old_heap_oid, Oid new_heap_oid);
 static Relation process_single_relation(RepackStmt *stmt,
 										LOCKMODE lockmode,
 										bool isTopLevel,
@@ -262,7 +266,14 @@ ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel)
 			verbose = defGetBoolean(opt);
 		else if (strcmp(opt->defname, "analyze") == 0 ||
 				 strcmp(opt->defname, "analyse") == 0)
+		{
+			if (stmt->command != REPACK_COMMAND_REPACK)
+				ereport(ERROR,
+						errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("ANALYZE option not supported for %s",
+							   RepackCommandAsString(stmt->command)));
 			analyze = defGetBoolean(opt);
+		}
 		else if (strcmp(opt->defname, "concurrently") == 0)
 		{
 			if (stmt->command != REPACK_COMMAND_REPACK)
@@ -372,7 +383,8 @@ ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel)
 	/*
 	 * If we don't have a relation yet, determine a relation list.  If we do,
 	 * then it must be a partitioned table, and we want to process its
-	 * partitions.
+	 * partitions.  Note that we don't acquire any locks on these tables, so
+	 * the returned list must be treated with suspicion.
 	 */
 	if (rel == NULL)
 	{
@@ -383,58 +395,8 @@ ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel)
 	}
 	else
 	{
-		Oid			relid;
-		bool		rel_is_index;
-
-		Assert(rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE);
-
-		/*
-		 * If USING INDEX was specified, resolve the index name now and pass
-		 * it down.
-		 */
-		if (stmt->usingindex)
-		{
-			/*
-			 * If no index name was specified when repacking a partitioned
-			 * table, punt for now.  Maybe we can improve this later.
-			 */
-			if (!stmt->indexname)
-			{
-				if (stmt->command == REPACK_COMMAND_CLUSTER)
-					ereport(ERROR,
-							errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-							errmsg("there is no previously clustered index for table \"%s\"",
-								   RelationGetRelationName(rel)));
-				else
-					ereport(ERROR,
-							errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					/*- translator: first %s is name of a SQL command, eg. REPACK */
-							errmsg("cannot execute %s on partitioned table \"%s\" USING INDEX with no index name",
-								   RepackCommandAsString(stmt->command),
-								   RelationGetRelationName(rel)));
-			}
-
-			relid = determine_clustered_index(rel, stmt->usingindex,
-											  stmt->indexname);
-			if (!OidIsValid(relid))
-				elog(ERROR, "unable to determine index to cluster on");
-			check_index_is_clusterable(rel, relid, AccessExclusiveLock);
-
-			rel_is_index = true;
-		}
-		else
-		{
-			relid = RelationGetRelid(rel);
-			rel_is_index = false;
-		}
-
-		rtcs = get_tables_to_repack_partitioned(stmt->command,
-												relid, rel_is_index,
-												repack_context);
-
-		/* close parent relation, releasing lock on it */
-		table_close(rel, AccessExclusiveLock);
-		rel = NULL;
+		rtcs = get_tables_to_repack_partitioned(stmt, rel, repack_context);
+		rel = NULL;				/* clobber no longer valid pointer */
 	}
 
 	/* Commit to get out of starting transaction */
@@ -449,12 +411,19 @@ ExecRepack(ParseState *pstate, RepackStmt *stmt, bool isTopLevel)
 		StartTransactionCommand();
 
 		/*
-		 * Open the target table, coping with the case where it has been
-		 * dropped.
+		 * Open the target table.  It may have been dropped or replaced with
+		 * something different, in which case silently skip it.
 		 */
-		rel = try_table_open(rtc->tableOid, lockmode);
+		rel = try_relation_open(rtc->tableOid, lockmode);
 		if (rel == NULL)
 		{
+			CommitTransactionCommand();
+			continue;
+		}
+		if (rel->rd_rel->relkind != RELKIND_RELATION &&
+			rel->rd_rel->relkind != RELKIND_MATVIEW)
+		{
+			relation_close(rel, lockmode);
 			CommitTransactionCommand();
 			continue;
 		}
@@ -710,8 +679,10 @@ cluster_rel_recheck(RepackCommand cmd, Relation OldHeap, Oid indexOid,
 {
 	Oid			tableOid = RelationGetRelid(OldHeap);
 
+	Assert(CheckRelationLockedByMe(OldHeap, lmode, false));
+
 	/* Check that the user still has privileges for the relation */
-	if (!repack_is_permitted_for_relation(cmd, tableOid, userid))
+	if (!repack_is_permitted_for_relation(cmd, tableOid, userid, true))
 	{
 		relation_close(OldHeap, lmode);
 		return false;
@@ -1082,6 +1053,13 @@ rebuild_relation(Relation OldHeap, Relation index, bool verbose,
 							   NoLock);
 	Assert(CheckRelationOidLockedByMe(OIDNewHeap, AccessExclusiveLock, false));
 	NewHeap = table_open(OIDNewHeap, NoLock);
+
+	/*
+	 * In concurrent mode, create a copy of the attribute defaults on the temp
+	 * table, which the executor needs when replaying concurrent data changes.
+	 */
+	if (concurrent)
+		copy_attribute_defaults(tableOid, OIDNewHeap);
 
 	/* Copy the heap data into the new table in the desired order */
 	copy_table_data(NewHeap, OldHeap, index, snapshot, verbose,
@@ -2142,6 +2120,10 @@ get_tables_to_repack(RepackCommand cmd, bool usingindex, MemoryContext permcxt)
 
 		/*
 		 * For USING INDEX, scan pg_index to find those with indisclustered.
+		 *
+		 * Note we don't obtain lock of any kind on the index, which means the
+		 * index or its owning table could be gone or change at any point.  We
+		 * have to be extra careful when examining catalog state for them.
 		 */
 		catalog = table_open(IndexRelationId, AccessShareLock);
 		ScanKeyInit(&entry,
@@ -2154,47 +2136,28 @@ get_tables_to_repack(RepackCommand cmd, bool usingindex, MemoryContext permcxt)
 			RelToCluster *rtc;
 			Form_pg_index index;
 			HeapTuple	classtup;
-			Form_pg_class classForm;
+			Oid			relnamespace;
+			char		relpersistence;
 			MemoryContext oldcxt;
 
 			index = (Form_pg_index) GETSTRUCT(tuple);
 
-			/*
-			 * Try to obtain a light lock on the index's table, to ensure it
-			 * doesn't go away while we collect the list.  If we cannot, just
-			 * disregard it.  Be sure to release this if we ultimately decide
-			 * not to process the table!
-			 */
-			if (!ConditionalLockRelationOid(index->indrelid, AccessShareLock))
-				continue;
-
-			/* Verify that the table still exists; skip if not */
 			classtup = SearchSysCache1(RELOID, ObjectIdGetDatum(index->indrelid));
 			if (!HeapTupleIsValid(classtup))
-			{
-				UnlockRelationOid(index->indrelid, AccessShareLock);
 				continue;
-			}
-			classForm = (Form_pg_class) GETSTRUCT(classtup);
+			relnamespace = ((Form_pg_class) GETSTRUCT(classtup))->relnamespace;
+			relpersistence = ((Form_pg_class) GETSTRUCT(classtup))->relpersistence;
+			ReleaseSysCache(classtup);
 
 			/* Skip temp relations belonging to other sessions */
-			if (classForm->relpersistence == RELPERSISTENCE_TEMP &&
-				!isTempOrTempToastNamespace(classForm->relnamespace))
-			{
-				ReleaseSysCache(classtup);
-				UnlockRelationOid(index->indrelid, AccessShareLock);
+			if (relpersistence == RELPERSISTENCE_TEMP &&
+				!isTempOrTempToastNamespace(relnamespace))
 				continue;
-			}
-
-			ReleaseSysCache(classtup);
 
 			/* noisily skip rels which the user can't process */
 			if (!repack_is_permitted_for_relation(cmd, index->indrelid,
-												  GetUserId()))
-			{
-				UnlockRelationOid(index->indrelid, AccessShareLock);
+												  GetUserId(), false))
 				continue;
-			}
 
 			/* Use a permanent memory context for the result list */
 			oldcxt = MemoryContextSwitchTo(permcxt);
@@ -2218,45 +2181,20 @@ get_tables_to_repack(RepackCommand cmd, bool usingindex, MemoryContext permcxt)
 
 			class = (Form_pg_class) GETSTRUCT(tuple);
 
-			/*
-			 * Try to obtain a light lock on the table, to ensure it doesn't
-			 * go away while we collect the list.  If we cannot, just
-			 * disregard the table.  Be sure to release this if we ultimately
-			 * decide not to process the table!
-			 */
-			if (!ConditionalLockRelationOid(class->oid, AccessShareLock))
-				continue;
-
-			/* Verify that the table still exists */
-			if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(class->oid)))
-			{
-				UnlockRelationOid(class->oid, AccessShareLock);
-				continue;
-			}
-
 			/* Can only process plain tables and matviews */
 			if (class->relkind != RELKIND_RELATION &&
 				class->relkind != RELKIND_MATVIEW)
-			{
-				UnlockRelationOid(class->oid, AccessShareLock);
 				continue;
-			}
 
 			/* Skip temp relations belonging to other sessions */
 			if (class->relpersistence == RELPERSISTENCE_TEMP &&
 				!isTempOrTempToastNamespace(class->relnamespace))
-			{
-				UnlockRelationOid(class->oid, AccessShareLock);
 				continue;
-			}
 
 			/* noisily skip rels which the user can't process */
 			if (!repack_is_permitted_for_relation(cmd, class->oid,
-												  GetUserId()))
-			{
-				UnlockRelationOid(class->oid, AccessShareLock);
+												  GetUserId(), false))
 				continue;
-			}
 
 			/* Use a permanent memory context for the result list */
 			oldcxt = MemoryContextSwitchTo(permcxt);
@@ -2269,24 +2207,76 @@ get_tables_to_repack(RepackCommand cmd, bool usingindex, MemoryContext permcxt)
 	}
 
 	table_endscan(scan);
-	relation_close(catalog, AccessShareLock);
+	table_close(catalog, AccessShareLock);
 
 	return rtcs;
 }
 
 /*
- * Given a partitioned table or its index, return a list of RelToCluster for
- * all the leaf child tables/indexes.
+ * Determine relations to process, when REPACK/CLUSTER is called with a
+ * partitioning table; that is, a list of its leaf partitions.  That table has
+ * already been opened by caller and is passed as 'rel'.  It is closed and
+ * unlocked here before return, so caller should clobber its pointer to avoid
+ * confusion.
  *
- * 'rel_is_index' tells whether 'relid' is that of an index (true) or of the
- * owning relation.
+ * Return it as a list of RelToCluster.
+ *
+ * XXX we don't support CONCURRENTLY for partitioned tables yet.
  */
 static List *
-get_tables_to_repack_partitioned(RepackCommand cmd, Oid relid,
-								 bool rel_is_index, MemoryContext permcxt)
+get_tables_to_repack_partitioned(RepackStmt *stmt, Relation rel,
+								 MemoryContext permcxt)
 {
+	Oid			relid;
+	bool		rel_is_index;
 	List	   *inhoids;
 	List	   *rtcs = NIL;
+
+	Assert(rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE);
+	Assert(CheckRelationLockedByMe(rel, AccessExclusiveLock, false));
+
+	/*
+	 * We find the list of tables by looking for inheritors.  If USING INDEX
+	 * was given, look for inheritors of that index, whose name we resolve
+	 * now.
+	 *
+	 * Otherwise we look for inheritors of the table itself.
+	 */
+	if (stmt->usingindex)
+	{
+		/*
+		 * If no index name was specified when repacking a partitioned table,
+		 * punt for now.  Maybe we can improve this later.
+		 */
+		if (!stmt->indexname)
+		{
+			if (stmt->command == REPACK_COMMAND_CLUSTER)
+				ereport(ERROR,
+						errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						errmsg("there is no previously clustered index for table \"%s\"",
+							   RelationGetRelationName(rel)));
+			else
+				ereport(ERROR,
+						errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				/*- translator: first %s is name of a SQL command, eg. REPACK */
+						errmsg("cannot execute %s on partitioned table \"%s\" USING INDEX with no index name",
+							   RepackCommandAsString(stmt->command),
+							   RelationGetRelationName(rel)));
+		}
+
+		relid = determine_clustered_index(rel, stmt->usingindex,
+										  stmt->indexname);
+		if (!OidIsValid(relid))
+			elog(ERROR, "unable to determine index to cluster on");
+		check_index_is_clusterable(rel, relid, AccessExclusiveLock);
+
+		rel_is_index = true;
+	}
+	else
+	{
+		relid = RelationGetRelid(rel);
+		rel_is_index = false;
+	}
 
 	/*
 	 * Do not lock the children until they're processed.  Note that we do hold
@@ -2306,7 +2296,14 @@ get_tables_to_repack_partitioned(RepackCommand cmd, Oid relid,
 			if (get_rel_relkind(child_oid) != RELKIND_INDEX)
 				continue;
 
-			table_oid = IndexGetRelation(child_oid, false);
+			/*
+			 * Although we do have a lock on some ancestor partitioned index,
+			 * we may not have one on the immediate parent, so this lookup may
+			 * still return invalid.
+			 */
+			table_oid = IndexGetRelation(child_oid, true);
+			if (!OidIsValid(table_oid))
+				continue;
 			index_oid = child_oid;
 		}
 		else
@@ -2324,7 +2321,8 @@ get_tables_to_repack_partitioned(RepackCommand cmd, Oid relid,
 		 * leaf partition despite having them on the partitioned table.  Skip
 		 * if so.
 		 */
-		if (!repack_is_permitted_for_relation(cmd, table_oid, GetUserId()))
+		if (!repack_is_permitted_for_relation(stmt->command, table_oid,
+											  GetUserId(), false))
 			continue;
 
 		/* Use a permanent memory context for the result list */
@@ -2336,26 +2334,62 @@ get_tables_to_repack_partitioned(RepackCommand cmd, Oid relid,
 		MemoryContextSwitchTo(oldcxt);
 	}
 
+	/* close parent relation, releasing lock on it */
+	table_close(rel, AccessExclusiveLock);
+
 	return rtcs;
 }
 
 
 /*
- * Return whether userid has privileges to REPACK relid.  If not, this
- * function emits a WARNING.
+ * Return whether userid has privileges to execute REPACK/CLUSTER on relid.
+ *
+ * The relation may already be locked by caller, in which case it cannot
+ * possibly go missing; otherwise it may have been removed recently.  If
+ * it's been removed, silently return false.  If the relation exists but
+ * the user doesn't have the required privs, emit a WARNING and return false.
+ *
+ * Otherwise the relation exists and user has required perms, so return true.
  */
 static bool
-repack_is_permitted_for_relation(RepackCommand cmd, Oid relid, Oid userid)
+repack_is_permitted_for_relation(RepackCommand cmd, Oid relid, Oid userid,
+								 bool already_locked)
 {
-	Assert(cmd == REPACK_COMMAND_CLUSTER || cmd == REPACK_COMMAND_REPACK);
+	bool		is_missing = false;
+	AclResult	result;
+	char	   *relname;
 
-	if (pg_class_aclcheck(relid, userid, ACL_MAINTAIN) == ACLCHECK_OK)
+	Assert(cmd == REPACK_COMMAND_CLUSTER || cmd == REPACK_COMMAND_REPACK);
+	Assert(!already_locked ||
+		   CheckRelationOidLockedByMe(relid, AccessShareLock, true));
+
+	result = pg_class_aclcheck_ext(relid, userid, ACL_MAINTAIN, &is_missing);
+
+	/*
+	 * If the relation was concurrently dropped, nothing to do.  This is only
+	 * reachable when the caller doesn't already have a lock on the relation.
+	 */
+	if (is_missing)
+	{
+		Assert(!already_locked);
+		return false;
+	}
+
+	if (result == ACLCHECK_OK)
 		return true;
 
-	ereport(WARNING,
-			errmsg("permission denied to execute %s on \"%s\", skipping it",
-				   RepackCommandAsString(cmd),
-				   get_rel_name(relid)));
+	/*
+	 * The relation can also be dropped after we tested its ACL and before we
+	 * read its relname, so be careful here.
+	 */
+	relname = get_rel_name(relid);
+	if (relname != NULL)
+	{
+		ereport(WARNING,
+				errmsg("permission denied to execute %s on \"%s\", skipping it",
+					   RepackCommandAsString(cmd), relname));
+		pfree(relname);
+	}
 
 	return false;
 }
@@ -2806,10 +2840,13 @@ restore_tuple(BufFile *file, Relation relation, TupleTableSlot *slot)
 			slot->tts_values[i] = PointerGetDatum(value);
 			natt_ext--;
 			if (natt_ext < 0)
-				ereport(ERROR,
-						errcode(ERRCODE_DATA_CORRUPTED),
-						errmsg("insufficient number of attributes stored separately"));
+				elog(ERROR, "insufficient number of attributes stored separately");
 		}
+
+		if (natt_ext != 0)
+			elog(ERROR,
+				 "unexpected number of attributes stored separately (%d remaining)",
+				 natt_ext);
 	}
 }
 
@@ -3007,8 +3044,60 @@ initialize_change_context(ChangeContext *chgcxt,
 	/* Only initialize fields needed by ExecInsertIndexTuples(). */
 	chgcxt->cc_estate = CreateExecutorState();
 
-	chgcxt->cc_rri = (ResultRelInfo *) palloc(sizeof(ResultRelInfo));
-	InitResultRelInfo(chgcxt->cc_rri, relation, 0, 0, 0);
+	/*
+	 * Set up a range table for the executor, containing our repacked table as
+	 * its only member.
+	 */
+	{
+		RangeTblEntry *rte;
+		TupleDesc	desc = RelationGetDescr(relation);
+		List	   *perminfos = NIL;
+		Bitmapset  *updatedCols = NULL;
+		RTEPermissionInfo *perminfo;
+
+		/*
+		 * For our use, the RTE only needs to have perminfoindex initialized,
+		 * but there's no reason to not set the fields whose values we have at
+		 * hand.
+		 */
+		rte = makeNode(RangeTblEntry);
+		rte->rtekind = RTE_RELATION;
+		rte->relid = RelationGetRelid(relation);
+		rte->relkind = RelationGetForm(relation)->relkind;
+		/* Create the RTEPermissionInfo instance (and set ->perminfoindex). */
+		addRTEPermissionInfo(&perminfos, rte);
+
+		/*
+		 * Initialize updatedCols to show that all columns are updated.  This
+		 * is of course not necessarily true, and we cannot know this early;
+		 * but this is only used by ExecInsertIndexTuples to flag index
+		 * updates with no logical value changes, so if it's wrong, nothing
+		 * terribly bad happens. We may want to improve this someday though.
+		 *
+		 * Don't claim that dropped columns are changed though.
+		 */
+		for (int i = 0; i < desc->natts; i++)
+		{
+			CompactAttribute *attr = TupleDescCompactAttr(desc, i);
+
+			if (attr->attisdropped)
+				continue;
+			updatedCols = bms_add_member(updatedCols,
+										 i + 1 - FirstLowInvalidHeapAttributeNumber);
+		}
+
+		/* install updatedCols in the right place */
+		perminfo = getRTEPermissionInfo(perminfos, rte);
+		perminfo->updatedCols = updatedCols;
+
+		/* finally we can initialize the range table proper */
+		ExecInitRangeTable(chgcxt->cc_estate, list_make1(rte), perminfos,
+						   bms_make_singleton(1));
+	}
+
+	/* Set up our ResultRelInfo to use for index updates */
+	chgcxt->cc_rri = makeNode(ResultRelInfo);
+	InitResultRelInfo(chgcxt->cc_rri, relation, 1, NULL, 0);
 	ExecOpenIndices(chgcxt->cc_rri, false);
 
 	/*
@@ -3367,7 +3456,7 @@ build_new_indexes(Relation NewHeap, Relation OldHeap, List *OldIndexes)
  *
  * We don't need the constraints for anything else (the original constraints
  * will be there once repack completes), so we add pg_depend entries so that
- * the are dropped when the transient table is dropped.
+ * they are dropped when the transient table is dropped.
  */
 static void
 copy_index_constraints(Relation old_index, Oid new_index_id, Oid new_heap_id)
@@ -3427,6 +3516,98 @@ copy_index_constraints(Relation old_index, Oid new_index_id, Oid new_heap_id)
 	systable_endscan(scan);
 
 	table_close(rel, RowExclusiveLock);
+
+	CommandCounterIncrement();
+}
+
+/*
+ * Create a transient copy of attribute defaults.
+ *
+ * When repacking a table that has stored generated columns, the executor
+ * relies on these entries to generate the values for them during apply of
+ * concurrent operations.  These copies are there to support that.
+ *
+ * We don't need the defaults for anything else, so we add pg_depend entries
+ * so that they are dropped when the transient table is dropped.
+ */
+static void
+copy_attribute_defaults(Oid old_heap_oid, Oid new_heap_oid)
+{
+	ScanKeyData skey;
+	Relation	rel;
+	Relation	att_rel;
+	SysScanDesc scan;
+	HeapTuple	def_tup;
+	ObjectAddress objrel;
+
+	rel = table_open(AttrDefaultRelationId, RowExclusiveLock);
+	att_rel = table_open(AttributeRelationId, RowExclusiveLock);
+
+	ObjectAddressSet(objrel, RelationRelationId, new_heap_oid);
+
+	ScanKeyInit(&skey,
+				Anum_pg_attrdef_adrelid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(old_heap_oid));
+	scan = systable_beginscan(rel, AttrDefaultIndexId, true,
+							  NULL, 1, &skey);
+	while (HeapTupleIsValid(def_tup = systable_getnext(scan)))
+	{
+		Form_pg_attrdef adform;
+		Oid			oid;
+		Datum		def_values[Natts_pg_attrdef];
+		bool		def_nulls[Natts_pg_attrdef];
+		bool		def_replaces[Natts_pg_attrdef] = {0};
+		Datum		att_values[Natts_pg_attribute];
+		bool		att_nulls[Natts_pg_attribute];
+		bool		att_replaces[Natts_pg_attribute] = {0};
+		HeapTuple	new_def_tup,
+					att_tup,
+					new_att_tup;
+		ObjectAddress objad;
+
+		adform = (Form_pg_attrdef) GETSTRUCT(def_tup);
+		Assert(adform->adrelid == old_heap_oid);
+
+		/*
+		 * Insert a new tuple that's identical to the existing one, other than
+		 * its OID and the relation it refers to.
+		 */
+		oid = GetNewOidWithIndex(rel, AttrDefaultOidIndexId,
+								 Anum_pg_attrdef_oid);
+		def_values[Anum_pg_attrdef_oid - 1] = ObjectIdGetDatum(oid);
+		def_nulls[Anum_pg_attrdef_oid - 1] = false;
+		def_replaces[Anum_pg_attrdef_oid - 1] = true;
+		def_values[Anum_pg_attrdef_adrelid - 1] = ObjectIdGetDatum(new_heap_oid);
+		def_nulls[Anum_pg_attrdef_adrelid - 1] = false;
+		def_replaces[Anum_pg_attrdef_adrelid - 1] = true;
+		new_def_tup = heap_modify_tuple(def_tup, RelationGetDescr(rel),
+										def_values, def_nulls, def_replaces);
+		CatalogTupleInsert(rel, new_def_tup);
+
+		/* Set atthasdef for this attribute in the transient table */
+		att_tup = SearchSysCache2(ATTNUM,
+								  ObjectIdGetDatum(new_heap_oid),
+								  ObjectIdGetDatum(adform->adnum));
+		if (!HeapTupleIsValid(att_tup))
+			elog(ERROR, "cache lookup failed for attribute %d of relation %u",
+				 adform->adnum, new_heap_oid);
+		att_values[Anum_pg_attribute_atthasdef - 1] = BoolGetDatum(true);
+		att_nulls[Anum_pg_attribute_atthasdef - 1] = false;
+		att_replaces[Anum_pg_attribute_atthasdef - 1] = true;
+		new_att_tup = heap_modify_tuple(att_tup, RelationGetDescr(att_rel),
+										att_values, att_nulls, att_replaces);
+		CatalogTupleUpdate(att_rel, &new_att_tup->t_self, new_att_tup);
+		ReleaseSysCache(att_tup);
+
+		/* Add a pg_depend record so it's removed with the transient table */
+		ObjectAddressSet(objad, AttrDefaultRelationId, oid);
+		recordDependencyOn(&objad, &objrel, DEPENDENCY_AUTO);
+	}
+	systable_endscan(scan);
+
+	table_close(rel, RowExclusiveLock);
+	table_close(att_rel, RowExclusiveLock);
 
 	CommandCounterIncrement();
 }

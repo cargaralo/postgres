@@ -257,7 +257,7 @@ gbt_ts_consistent(PG_FUNCTION_ARGS)
 	key.lower = (GBT_NUMKEY *) &kkk->lower;
 	key.upper = (GBT_NUMKEY *) &kkk->upper;
 
-	PG_RETURN_BOOL(gbt_num_consistent(&key, &query, &strategy,
+	PG_RETURN_BOOL(gbt_num_consistent(&key, &query, strategy,
 									  GIST_LEAF(entry), &tinfo, fcinfo->flinfo));
 }
 
@@ -300,7 +300,7 @@ gbt_tstz_consistent(PG_FUNCTION_ARGS)
 	key.upper = (GBT_NUMKEY *) &kkk[MAXALIGN(tinfo.size)];
 	qqq = tstz_to_ts_gmt(query);
 
-	PG_RETURN_BOOL(gbt_num_consistent(&key, &qqq, &strategy,
+	PG_RETURN_BOOL(gbt_num_consistent(&key, &qqq, strategy,
 									  GIST_LEAF(entry), &tinfo, fcinfo->flinfo));
 }
 
@@ -329,7 +329,7 @@ Datum
 gbt_ts_union(PG_FUNCTION_ARGS)
 {
 	GistEntryVector *entryvec = (GistEntryVector *) PG_GETARG_POINTER(0);
-	void	   *out = palloc(sizeof(tsKEY));
+	void	   *out = palloc_object(tsKEY);
 
 	*(int *) PG_GETARG_POINTER(1) = sizeof(tsKEY);
 	PG_RETURN_POINTER(gbt_num_union(out, entryvec, &tinfo, fcinfo->flinfo));

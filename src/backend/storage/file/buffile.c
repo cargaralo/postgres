@@ -172,8 +172,7 @@ extendBufFile(BufFile *file)
 
 	CurrentResourceOwner = oldowner;
 
-	file->files = (File *) repalloc(file->files,
-									(file->numFiles + 1) * sizeof(File));
+	file->files = repalloc_array(file->files, File, file->numFiles + 1);
 	file->files[file->numFiles] = pfile;
 	file->numFiles++;
 }
@@ -437,6 +436,7 @@ BufFileLoadBuffer(BufFile *file)
 	File		thisfile;
 	instr_time	io_start;
 	instr_time	io_time;
+	ssize_t		rc;
 
 	/*
 	 * Advance to next component file if necessary and possible.
@@ -458,12 +458,12 @@ BufFileLoadBuffer(BufFile *file)
 	/*
 	 * Read whatever we can get, up to a full bufferload.
 	 */
-	file->nbytes = FileRead(thisfile,
-							file->buffer.data,
-							sizeof(file->buffer.data),
-							file->curOffset,
-							WAIT_EVENT_BUFFILE_READ);
-	if (file->nbytes < 0)
+	rc = FileRead(thisfile,
+				  file->buffer.data,
+				  sizeof(file->buffer.data),
+				  file->curOffset,
+				  WAIT_EVENT_BUFFILE_READ);
+	if (rc < 0)
 	{
 		file->nbytes = 0;
 		ereport(ERROR,
@@ -471,6 +471,8 @@ BufFileLoadBuffer(BufFile *file)
 				 errmsg("could not read file \"%s\": %m",
 						FilePathName(thisfile))));
 	}
+
+	file->nbytes = rc;
 
 	if (track_io_timing)
 	{
@@ -495,7 +497,6 @@ static void
 BufFileDumpBuffer(BufFile *file)
 {
 	int64		wpos = 0;
-	int64		bytestowrite;
 	File		thisfile;
 
 	/*
@@ -507,6 +508,8 @@ BufFileDumpBuffer(BufFile *file)
 		int64		availbytes;
 		instr_time	io_start;
 		instr_time	io_time;
+		size_t		bytestowrite;
+		ssize_t		rc;
 
 		/*
 		 * Advance to next component file if necessary and possible.
@@ -535,12 +538,12 @@ BufFileDumpBuffer(BufFile *file)
 		else
 			INSTR_TIME_SET_ZERO(io_start);
 
-		bytestowrite = FileWrite(thisfile,
-								 file->buffer.data + wpos,
-								 bytestowrite,
-								 file->curOffset,
-								 WAIT_EVENT_BUFFILE_WRITE);
-		if (bytestowrite <= 0)
+		rc = FileWrite(thisfile,
+					   file->buffer.data + wpos,
+					   bytestowrite,
+					   file->curOffset,
+					   WAIT_EVENT_BUFFILE_WRITE);
+		if (rc <= 0)
 			ereport(ERROR,
 					(errcode_for_file_access(),
 					 errmsg("could not write to file \"%s\": %m",
@@ -552,8 +555,8 @@ BufFileDumpBuffer(BufFile *file)
 			INSTR_TIME_ACCUM_DIFF(pgBufferUsage.temp_blk_write_time, io_time, io_start);
 		}
 
-		file->curOffset += bytestowrite;
-		wpos += bytestowrite;
+		file->curOffset += rc;
+		wpos += rc;
 
 		pgBufferUsage.temp_blks_written++;
 	}
@@ -911,8 +914,7 @@ BufFileAppend(BufFile *target, BufFile *source)
 	if (target->resowner != source->resowner)
 		elog(ERROR, "could not append BufFile with non-matching resource owner");
 
-	target->files = (File *)
-		repalloc(target->files, sizeof(File) * newNumFiles);
+	target->files = repalloc_array(target->files, File, newNumFiles);
 	for (i = target->numFiles; i < newNumFiles; i++)
 		target->files[i] = source->files[i - target->numFiles];
 	target->numFiles = newNumFiles;

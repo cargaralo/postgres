@@ -24,57 +24,6 @@
   separately-installable extension.
  </para>
 
- <sect2 id="contrib-spi-refint">
-  <title>refint &mdash; Functions for Implementing Referential Integrity</title>
-
-  <para>
-   <function>check_primary_key()</function> and
-   <function>check_foreign_key()</function> are used to check foreign key constraints.
-   (This functionality is long since superseded by the built-in foreign
-   key mechanism, of course, but the module is still useful as an example.)
-  </para>
-
-  <para>
-   <function>check_primary_key()</function> checks the referencing table.
-   To use, create an <literal>AFTER INSERT OR UPDATE</literal> trigger using this
-   function on a table referencing another table. Specify as the trigger
-   arguments: the referencing table's column name(s) which form the foreign
-   key, the referenced table name, and the column names in the referenced table
-   which form the primary/unique key.  To handle multiple foreign
-   keys, create a trigger for each reference.
-  </para>
-
-  <para>
-   <function>check_foreign_key()</function> checks the referenced table.
-   To use, create an <literal>AFTER DELETE OR UPDATE</literal> trigger using this
-   function on a table referenced by other table(s).  Specify as the trigger
-   arguments: the number of referencing tables for which the function has to
-   perform checking, the action if a referencing key is found
-   (<literal>cascade</literal> &mdash; to delete the referencing row,
-   <literal>restrict</literal> &mdash; to abort transaction if referencing keys
-   exist, <literal>setnull</literal> &mdash; to set referencing key fields to null),
-   the triggered table's column names which form the primary/unique key, then
-   the referencing table name and column names (repeated for as many
-   referencing tables as were specified by first argument).  Note that the
-   primary/unique key columns should be marked NOT NULL and should have a
-   unique index.
-  </para>
-
-  <para>
-   Note that if these triggers are executed from
-   another <literal>BEFORE</literal> trigger, they can fail unexpectedly. For
-   example, if a user inserts row1 and then the <literal>BEFORE</literal>
-   trigger inserts row2 and calls a trigger with the
-   <function>check_foreign_key()</function>,
-   the <function>check_foreign_key()</function>
-   function will not see row1 and will fail.
-  </para>
-
-  <para>
-   There are examples in <filename>refint.example</filename>.
-  </para>
- </sect2>
-
  <sect2 id="contrib-spi-autoinc">
   <title>autoinc &mdash; Functions for Autoincrementing Fields</title>
 

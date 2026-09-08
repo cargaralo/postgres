@@ -189,8 +189,7 @@ InitJumble(void)
 	jstate->jumble = (unsigned char *) palloc(JUMBLE_SIZE);
 	jstate->jumble_len = 0;
 	jstate->clocations_buf_size = 32;
-	jstate->clocations = (LocationLen *) palloc(jstate->clocations_buf_size *
-												sizeof(LocationLen));
+	jstate->clocations = palloc_array(LocationLen, jstate->clocations_buf_size);
 	jstate->clocations_count = 0;
 	jstate->highest_extern_param_id = 0;
 	jstate->pending_nulls = 0;
@@ -232,7 +231,7 @@ DoJumble(JumbleState *jstate, Node *node)
  *
  * Note: Callers must ensure that size > 0.
  */
-static pg_attribute_always_inline void
+static pg_always_inline void
 AppendJumbleInternal(JumbleState *jstate, const unsigned char *item,
 					 Size size)
 {
@@ -308,7 +307,7 @@ AppendJumble(JumbleState *jstate, const unsigned char *value, Size size)
  * AppendJumbleNull
  *		For jumbling NULL pointers
  */
-static pg_attribute_always_inline void
+static pg_always_inline void
 AppendJumbleNull(JumbleState *jstate)
 {
 	jstate->pending_nulls++;
@@ -375,7 +374,7 @@ AppendJumble64(JumbleState *jstate, const unsigned char *value)
  *
  * Note: Callers must ensure that there's at least 1 pending NULL.
  */
-static pg_attribute_always_inline void
+static pg_always_inline void
 FlushPendingNulls(JumbleState *jstate)
 {
 	Assert(jstate->pending_nulls > 0);
@@ -406,10 +405,9 @@ RecordConstLocation(JumbleState *jstate, bool extern_param, int location, int le
 		if (jstate->clocations_count >= jstate->clocations_buf_size)
 		{
 			jstate->clocations_buf_size *= 2;
-			jstate->clocations = (LocationLen *)
-				repalloc(jstate->clocations,
-						 jstate->clocations_buf_size *
-						 sizeof(LocationLen));
+			jstate->clocations = repalloc_array(jstate->clocations,
+												LocationLen,
+												jstate->clocations_buf_size);
 		}
 		jstate->clocations[jstate->clocations_count].location = location;
 

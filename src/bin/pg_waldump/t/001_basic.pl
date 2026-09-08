@@ -54,6 +54,22 @@ command_fails_like(
 	[ 'pg_waldump', '--end' => 'bad' ],
 	qr/error: invalid WAL location/,
 	'invalid end LSN');
+command_fails_like(
+	[ 'pg_waldump', '--start' => '123456789/0' ],
+	qr/error: invalid WAL location/,
+	'start LSN with first component wider than 32 bits');
+command_fails_like(
+	[ 'pg_waldump', '--start' => '0/123456789' ],
+	qr/error: invalid WAL location/,
+	'start LSN with second component wider than 32 bits');
+command_fails_like(
+	[ 'pg_waldump', '--end' => '1/2/3' ],
+	qr/error: invalid WAL location/,
+	'end LSN with trailing garbage');
+command_fails_like(
+	[ 'pg_waldump', '--end' => '0x1/0' ],
+	qr/error: invalid WAL location/,
+	'end LSN with 0x prefix');
 
 # rmgr list: If you add one to the list, consider also adding a test
 # case exercising the new rmgr below.
@@ -227,8 +243,14 @@ command_fails_like(
 	[ 'pg_waldump', 'foo', 'bar' ],
 	qr/error: could not locate WAL file "foo"/,
 	'start file not found');
-command_like([ 'pg_waldump', $node->data_dir . '/pg_wal/' . $start_walfile ],
-	qr/./, 'runs with start segment specified');
+command_like(
+	[
+		'pg_waldump',
+		'--limit' => 1,
+		$node->data_dir . '/pg_wal/' . $start_walfile
+	],
+	qr/./,
+	'runs with start segment specified');
 command_fails_like(
 	[ 'pg_waldump', $node->data_dir . '/pg_wal/' . $start_walfile, 'bar' ],
 	qr/error: could not open file "bar"/,
@@ -236,6 +258,7 @@ command_fails_like(
 command_like(
 	[
 		'pg_waldump',
+		'--limit' => 1,
 		$node->data_dir . '/pg_wal/' . $start_walfile,
 		$node->data_dir . '/pg_wal/' . $end_walfile
 	],
@@ -244,6 +267,7 @@ command_like(
 command_like(
 	[
 		'pg_waldump', '--quiet',
+		'--limit' => 1,
 		'--path', $node->data_dir . '/pg_wal/',
 		$start_walfile
 	],
@@ -297,6 +321,7 @@ sub test_pg_waldump_skip_bytes
 		'--start' => $new_start,
 		'--end' => $endlsn,
 		'--path' => $path,
+		'--limit' => 1,
 	  ],
 	  '>' => \$stdout,
 	  '2>' => \$stderr;
@@ -409,14 +434,18 @@ for my $scenario (@scenarios)
 				'--path' => $path,
 				'--start' => $start_lsn,
 				'--end' => $end_lsn,
+				'--limit' => 1,
 			],
 			qr/./,
 			'runs with path option and start and end locations');
+
+		# Start near the end to avoid decoding records that are not relevant
+		# to the fall-off-the-end tests.
 		command_fails_like(
 			[
 				'pg_waldump',
 				'--path' => $path,
-				'--start' => $start_lsn,
+				'--start' => $contrecord_lsn,
 			],
 			qr/error: error in WAL record at/,
 			'falling off the end of the WAL results in an error');
@@ -425,7 +454,7 @@ for my $scenario (@scenarios)
 			[
 				'pg_waldump', '--quiet',
 				'--path' => $path,
-				'--start' => $start_lsn
+				'--start' => $contrecord_lsn
 			],
 			qr/error: error in WAL record at/,
 			'errors are shown with --quiet');

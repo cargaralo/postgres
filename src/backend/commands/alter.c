@@ -318,9 +318,9 @@ AlterObjectRename_internal(Relation rel, Oid objectId, const char *new_name)
 	}
 
 	/* Build modified tuple */
-	values = palloc0(RelationGetNumberOfAttributes(rel) * sizeof(Datum));
-	nulls = palloc0(RelationGetNumberOfAttributes(rel) * sizeof(bool));
-	replaces = palloc0(RelationGetNumberOfAttributes(rel) * sizeof(bool));
+	values = palloc0_array(Datum, RelationGetNumberOfAttributes(rel));
+	nulls = palloc0_array(bool, RelationGetNumberOfAttributes(rel));
+	replaces = palloc0_array(bool, RelationGetNumberOfAttributes(rel));
 	namestrcpy(&nameattrdata, new_name);
 	values[Anum_name - 1] = NameGetDatum(&nameattrdata);
 	replaces[Anum_name - 1] = true;
@@ -390,7 +390,6 @@ ExecRenameStmt(RenameStmt *stmt)
 		case OBJECT_MATVIEW:
 		case OBJECT_INDEX:
 		case OBJECT_FOREIGN_TABLE:
-		case OBJECT_PROPGRAPH:
 			return RenameRelation(stmt);
 
 		case OBJECT_COLUMN:
@@ -544,7 +543,6 @@ ExecAlterObjectSchemaStmt(AlterObjectSchemaStmt *stmt,
 		case OBJECT_TABLE:
 		case OBJECT_VIEW:
 		case OBJECT_MATVIEW:
-		case OBJECT_PROPGRAPH:
 			address = AlterTableNamespace(stmt,
 										  oldSchemaAddr ? &oldNspOid : NULL);
 			break;
@@ -798,9 +796,9 @@ AlterObjectNamespace_internal(Relation rel, Oid objid, Oid nspOid)
 								  nspOid);
 
 	/* Build modified tuple */
-	values = palloc0(RelationGetNumberOfAttributes(rel) * sizeof(Datum));
-	nulls = palloc0(RelationGetNumberOfAttributes(rel) * sizeof(bool));
-	replaces = palloc0(RelationGetNumberOfAttributes(rel) * sizeof(bool));
+	values = palloc0_array(Datum, RelationGetNumberOfAttributes(rel));
+	nulls = palloc0_array(bool, RelationGetNumberOfAttributes(rel));
+	replaces = palloc0_array(bool, RelationGetNumberOfAttributes(rel));
 	values[Anum_namespace - 1] = ObjectIdGetDatum(nspOid);
 	replaces[Anum_namespace - 1] = true;
 	newtup = heap_modify_tuple(tup, RelationGetDescr(rel),
@@ -878,7 +876,6 @@ ExecAlterOwnerStmt(AlterOwnerStmt *stmt)
 		case OBJECT_OPCLASS:
 		case OBJECT_OPFAMILY:
 		case OBJECT_PROCEDURE:
-		case OBJECT_PROPGRAPH:
 		case OBJECT_ROUTINE:
 		case OBJECT_STATISTIC_EXT:
 		case OBJECT_TABLESPACE:
@@ -887,26 +884,11 @@ ExecAlterOwnerStmt(AlterOwnerStmt *stmt)
 			{
 				ObjectAddress address;
 
-				if (stmt->relation)
-				{
-					Relation	relation;
-
-					address = get_object_address_rv(stmt->objectType,
-													stmt->relation,
-													NIL,
-													&relation,
-													AccessExclusiveLock,
-													false);
-					relation_close(relation, NoLock);
-				}
-				else
-				{
-					address = get_object_address(stmt->objectType,
-												 stmt->object,
-												 NULL,
-												 AccessExclusiveLock,
-												 false);
-				}
+				address = get_object_address(stmt->objectType,
+											 stmt->object,
+											 NULL,
+											 AccessExclusiveLock,
+											 false);
 
 				AlterObjectOwner_internal(address.classId, address.objectId,
 										  newowner);
@@ -1024,9 +1006,9 @@ AlterObjectOwner_internal(Oid classId, Oid objectId, Oid new_ownerId)
 
 		/* Build a modified tuple */
 		nattrs = RelationGetNumberOfAttributes(rel);
-		values = palloc0(nattrs * sizeof(Datum));
-		nulls = palloc0(nattrs * sizeof(bool));
-		replaces = palloc0(nattrs * sizeof(bool));
+		values = palloc0_array(Datum, nattrs);
+		nulls = palloc0_array(bool, nattrs);
+		replaces = palloc0_array(bool, nattrs);
 		values[Anum_owner - 1] = ObjectIdGetDatum(new_ownerId);
 		replaces[Anum_owner - 1] = true;
 

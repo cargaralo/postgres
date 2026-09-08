@@ -17,10 +17,13 @@
 
 #include "postgres.h"
 
+#include <math.h>
+
 #include "access/heapam.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
 #include "nodes/makefuncs.h"
+#include "statistics/statistics.h"
 #include "statistics/stat_utils.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
@@ -57,6 +60,8 @@ static struct StatsArgInfo relarginfo[] =
 };
 
 static bool relation_statistics_update(FunctionCallInfo fcinfo);
+static bool relation_statistics_update_internal(Oid reloid,
+												FunctionCallInfo fcinfo);
 
 /*
  * Internal function for modifying statistics for a relation.
@@ -64,25 +69,9 @@ static bool relation_statistics_update(FunctionCallInfo fcinfo);
 static bool
 relation_statistics_update(FunctionCallInfo fcinfo)
 {
-	bool		result = true;
 	char	   *nspname;
 	char	   *relname;
 	Oid			reloid;
-	Relation	crel;
-	BlockNumber relpages = 0;
-	bool		update_relpages = false;
-	float		reltuples = 0;
-	bool		update_reltuples = false;
-	BlockNumber relallvisible = 0;
-	bool		update_relallvisible = false;
-	BlockNumber relallfrozen = 0;
-	bool		update_relallfrozen = false;
-	HeapTuple	ctup;
-	Form_pg_class pgcform;
-	int			replaces[4] = {0};
-	Datum		values[4] = {0};
-	bool		nulls[4] = {0};
-	int			nreplaces = 0;
 	Oid			locked_table = InvalidOid;
 
 	stats_check_required_arg(fcinfo, relarginfo, RELSCHEMA_ARG);
@@ -101,16 +90,49 @@ relation_statistics_update(FunctionCallInfo fcinfo)
 									  ShareUpdateExclusiveLock, 0,
 									  RangeVarCallbackForStats, &locked_table);
 
+	return relation_statistics_update_internal(reloid, fcinfo);
+}
+
+/*
+ * Workhorse function for relation_statistics_update.
+ */
+static bool
+relation_statistics_update_internal(Oid reloid, FunctionCallInfo fcinfo)
+{
+	int32		relpages = 0;
+	bool		update_relpages = false;
+	float4		reltuples = 0;
+	bool		update_reltuples = false;
+	int32		relallvisible = 0;
+	bool		update_relallvisible = false;
+	int32		relallfrozen = 0;
+	bool		update_relallfrozen = false;
+	Relation	crel;
+	HeapTuple	ctup;
+	Form_pg_class pgcform;
+	int			replaces[4] = {0};
+	Datum		values[4] = {0};
+	bool		nulls[4] = {0};
+	int			nreplaces = 0;
+	bool		result = true;
+
 	if (!PG_ARGISNULL(RELPAGES_ARG))
 	{
-		relpages = PG_GETARG_UINT32(RELPAGES_ARG);
+		relpages = PG_GETARG_INT32(RELPAGES_ARG);
 		update_relpages = true;
 	}
 
 	if (!PG_ARGISNULL(RELTUPLES_ARG))
 	{
 		reltuples = PG_GETARG_FLOAT4(RELTUPLES_ARG);
-		if (reltuples < -1.0)
+		if (isnan(reltuples) || isinf(reltuples))
+		{
+			ereport(WARNING,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("argument \"%s\" must be a finite value", "reltuples")));
+			result = false;
+		}
+		else if (reltuples < -1.0)
 		{
 			ereport(WARNING,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -123,13 +145,13 @@ relation_statistics_update(FunctionCallInfo fcinfo)
 
 	if (!PG_ARGISNULL(RELALLVISIBLE_ARG))
 	{
-		relallvisible = PG_GETARG_UINT32(RELALLVISIBLE_ARG);
+		relallvisible = PG_GETARG_INT32(RELALLVISIBLE_ARG);
 		update_relallvisible = true;
 	}
 
 	if (!PG_ARGISNULL(RELALLFROZEN_ARG))
 	{
-		relallfrozen = PG_GETARG_UINT32(RELALLFROZEN_ARG);
+		relallfrozen = PG_GETARG_INT32(RELALLFROZEN_ARG);
 		update_relallfrozen = true;
 	}
 
@@ -148,7 +170,7 @@ relation_statistics_update(FunctionCallInfo fcinfo)
 	if (update_relpages && relpages != pgcform->relpages)
 	{
 		replaces[nreplaces] = Anum_pg_class_relpages;
-		values[nreplaces] = UInt32GetDatum(relpages);
+		values[nreplaces] = Int32GetDatum(relpages);
 		nreplaces++;
 	}
 
@@ -162,14 +184,14 @@ relation_statistics_update(FunctionCallInfo fcinfo)
 	if (update_relallvisible && relallvisible != pgcform->relallvisible)
 	{
 		replaces[nreplaces] = Anum_pg_class_relallvisible;
-		values[nreplaces] = UInt32GetDatum(relallvisible);
+		values[nreplaces] = Int32GetDatum(relallvisible);
 		nreplaces++;
 	}
 
 	if (update_relallfrozen && relallfrozen != pgcform->relallfrozen)
 	{
 		replaces[nreplaces] = Anum_pg_class_relallfrozen;
-		values[nreplaces] = UInt32GetDatum(relallfrozen);
+		values[nreplaces] = Int32GetDatum(relallfrozen);
 		nreplaces++;
 	}
 
@@ -209,13 +231,13 @@ pg_clear_relation_stats(PG_FUNCTION_ARGS)
 	newfcinfo->args[0].isnull = PG_ARGISNULL(0);
 	newfcinfo->args[1].value = PG_GETARG_DATUM(1);
 	newfcinfo->args[1].isnull = PG_ARGISNULL(1);
-	newfcinfo->args[2].value = UInt32GetDatum(0);
+	newfcinfo->args[2].value = Int32GetDatum(0);
 	newfcinfo->args[2].isnull = false;
 	newfcinfo->args[3].value = Float4GetDatum(-1.0);
 	newfcinfo->args[3].isnull = false;
-	newfcinfo->args[4].value = UInt32GetDatum(0);
+	newfcinfo->args[4].value = Int32GetDatum(0);
 	newfcinfo->args[4].isnull = false;
-	newfcinfo->args[5].value = UInt32GetDatum(0);
+	newfcinfo->args[5].value = Int32GetDatum(0);
 	newfcinfo->args[5].isnull = false;
 
 	relation_statistics_update(newfcinfo);
@@ -240,4 +262,45 @@ pg_restore_relation_stats(PG_FUNCTION_ARGS)
 		result = false;
 
 	PG_RETURN_BOOL(result);
+}
+
+/*
+ * Import relation statistics from NullableDatum inputs for all statistical
+ * values.
+ *
+ * For now, the 'version' argument is ignored. In the future it can be used
+ * to interpret older statistics properly.
+ */
+bool
+import_relation_statistics(Relation rel,
+						   const NullableDatum *version,
+						   const NullableDatum *relpages,
+						   const NullableDatum *reltuples,
+						   const NullableDatum *relallvisible,
+						   const NullableDatum *relallfrozen)
+{
+	LOCAL_FCINFO(newfcinfo, NUM_RELATION_STATS_ARGS);
+
+	Assert(relpages);
+	Assert(reltuples);
+	Assert(relallvisible);
+	Assert(relallfrozen);
+
+	InitFunctionCallInfoData(*newfcinfo, NULL, NUM_RELATION_STATS_ARGS,
+							 InvalidOid, NULL, NULL);
+
+	newfcinfo->args[RELSCHEMA_ARG].value =
+		CStringGetTextDatum(get_namespace_name(RelationGetNamespace(rel)));
+	newfcinfo->args[RELSCHEMA_ARG].isnull = false;
+	newfcinfo->args[RELNAME_ARG].value =
+		CStringGetTextDatum(RelationGetRelationName(rel));
+	newfcinfo->args[RELNAME_ARG].isnull = false;
+
+	newfcinfo->args[RELPAGES_ARG] = *relpages;
+	newfcinfo->args[RELTUPLES_ARG] = *reltuples;
+	newfcinfo->args[RELALLVISIBLE_ARG] = *relallvisible;
+	newfcinfo->args[RELALLFROZEN_ARG] = *relallfrozen;
+
+	return relation_statistics_update_internal(RelationGetRelid(rel),
+											   newfcinfo);
 }

@@ -722,9 +722,9 @@ CREATE VIEW pg_stat_all_tables AS
             pg_stat_get_numscans(C.oid) AS seq_scan,
             pg_stat_get_lastscan(C.oid) AS last_seq_scan,
             pg_stat_get_tuples_returned(C.oid) AS seq_tup_read,
-            sum(pg_stat_get_numscans(I.indexrelid))::bigint AS idx_scan,
-            max(pg_stat_get_lastscan(I.indexrelid)) AS last_idx_scan,
-            sum(pg_stat_get_tuples_fetched(I.indexrelid))::bigint +
+            sum(pg_stat_get_idx_numscans(I.indexrelid))::bigint AS idx_scan,
+            max(pg_stat_get_idx_lastscan(I.indexrelid)) AS last_idx_scan,
+            sum(pg_stat_get_idx_tuples_fetched(I.indexrelid))::bigint +
             pg_stat_get_tuples_fetched(C.oid) AS idx_tup_fetch,
             pg_stat_get_tuples_inserted(C.oid) AS n_tup_ins,
             pg_stat_get_tuples_updated(C.oid) AS n_tup_upd,
@@ -761,8 +761,8 @@ CREATE VIEW pg_stat_xact_all_tables AS
             C.relname AS relname,
             pg_stat_get_xact_numscans(C.oid) AS seq_scan,
             pg_stat_get_xact_tuples_returned(C.oid) AS seq_tup_read,
-            sum(pg_stat_get_xact_numscans(I.indexrelid))::bigint AS idx_scan,
-            sum(pg_stat_get_xact_tuples_fetched(I.indexrelid))::bigint +
+            sum(pg_stat_get_xact_idx_numscans(I.indexrelid))::bigint AS idx_scan,
+            sum(pg_stat_get_xact_idx_tuples_fetched(I.indexrelid))::bigint +
             pg_stat_get_xact_tuples_fetched(C.oid) AS idx_tup_fetch,
             pg_stat_get_xact_tuples_inserted(C.oid) AS n_tup_ins,
             pg_stat_get_xact_tuples_updated(C.oid) AS n_tup_upd,
@@ -833,17 +833,17 @@ CREATE VIEW pg_statio_all_tables AS
             pg_class T ON C.reltoastrelid = T.oid
             LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
             LEFT JOIN LATERAL (
-              SELECT sum(pg_stat_get_blocks_fetched(indexrelid) -
-                         pg_stat_get_blocks_hit(indexrelid))::bigint
+              SELECT sum(pg_stat_get_idx_blocks_fetched(indexrelid) -
+                         pg_stat_get_idx_blocks_hit(indexrelid))::bigint
                      AS idx_blks_read,
-                     sum(pg_stat_get_blocks_hit(indexrelid))::bigint
+                     sum(pg_stat_get_idx_blocks_hit(indexrelid))::bigint
                      AS idx_blks_hit
               FROM pg_index WHERE indrelid = C.oid ) I ON true
             LEFT JOIN LATERAL (
-              SELECT sum(pg_stat_get_blocks_fetched(indexrelid) -
-                         pg_stat_get_blocks_hit(indexrelid))::bigint
+              SELECT sum(pg_stat_get_idx_blocks_fetched(indexrelid) -
+                         pg_stat_get_idx_blocks_hit(indexrelid))::bigint
                      AS idx_blks_read,
-                     sum(pg_stat_get_blocks_hit(indexrelid))::bigint
+                     sum(pg_stat_get_idx_blocks_hit(indexrelid))::bigint
                      AS idx_blks_hit
               FROM pg_index WHERE indrelid = T.oid ) X ON true
     WHERE C.relkind IN ('r', 't', 'm');
@@ -865,11 +865,11 @@ CREATE VIEW pg_stat_all_indexes AS
             N.nspname AS schemaname,
             C.relname AS relname,
             I.relname AS indexrelname,
-            pg_stat_get_numscans(I.oid) AS idx_scan,
-            pg_stat_get_lastscan(I.oid) AS last_idx_scan,
-            pg_stat_get_tuples_returned(I.oid) AS idx_tup_read,
-            pg_stat_get_tuples_fetched(I.oid) AS idx_tup_fetch,
-            pg_stat_get_stat_reset_time(I.oid) AS stats_reset
+            pg_stat_get_idx_numscans(I.oid) AS idx_scan,
+            pg_stat_get_idx_lastscan(I.oid) AS last_idx_scan,
+            pg_stat_get_idx_tuples_returned(I.oid) AS idx_tup_read,
+            pg_stat_get_idx_tuples_fetched(I.oid) AS idx_tup_fetch,
+            pg_stat_get_idx_stat_reset_time(I.oid) AS stats_reset
     FROM pg_class C JOIN
             pg_index X ON C.oid = X.indrelid JOIN
             pg_class I ON I.oid = X.indexrelid
@@ -893,10 +893,10 @@ CREATE VIEW pg_statio_all_indexes AS
             N.nspname AS schemaname,
             C.relname AS relname,
             I.relname AS indexrelname,
-            pg_stat_get_blocks_fetched(I.oid) -
-                    pg_stat_get_blocks_hit(I.oid) AS idx_blks_read,
-            pg_stat_get_blocks_hit(I.oid) AS idx_blks_hit,
-            pg_stat_get_stat_reset_time(I.oid) AS stats_reset
+            pg_stat_get_idx_blocks_fetched(I.oid) -
+                    pg_stat_get_idx_blocks_hit(I.oid) AS idx_blks_read,
+            pg_stat_get_idx_blocks_hit(I.oid) AS idx_blks_hit,
+            pg_stat_get_idx_stat_reset_time(I.oid) AS stats_reset
     FROM pg_class C JOIN
             pg_index X ON C.oid = X.indrelid JOIN
             pg_class I ON I.oid = X.indexrelid
@@ -1282,6 +1282,17 @@ SELECT
        b.stats_reset
 FROM pg_stat_get_io() b;
 
+CREATE VIEW pg_stat_kind_info AS
+    SELECT
+        k.id,
+        k.name,
+        k.builtin,
+        k.fixed_amount,
+        k.accessed_across_databases,
+        k.write_to_file,
+        k.entry_count
+    FROM pg_stat_get_kind_info() k;
+
 CREATE VIEW pg_stat_wal AS
     SELECT
         w.wal_records,
@@ -1482,7 +1493,7 @@ CREATE VIEW pg_stat_progress_data_checksums AS
                       WHEN 4 THEN 'done'
                       END AS phase,
         CASE S.param2 WHEN -1 THEN NULL ELSE S.param2 END AS databases_total,
-        S.param3 AS databases_done,
+        CASE S.param3 WHEN -1 THEN NULL ELSE S.param3 END AS databases_done,
         CASE S.param4 WHEN -1 THEN NULL ELSE S.param4 END AS relations_total,
         CASE S.param5 WHEN -1 THEN NULL ELSE S.param5 END AS relations_done,
         CASE S.param6 WHEN -1 THEN NULL ELSE S.param6 END AS blocks_total,
@@ -1527,7 +1538,8 @@ GRANT SELECT (oid, subdbid, subskiplsn, subname, subowner, subenabled,
               subbinary, substream, subtwophasestate, subdisableonerr,
 			  subpasswordrequired, subrunasowner, subfailover,
               subretaindeadtuples, submaxretention, subretentionactive,
-              subserver, subslotname, subsynccommit, subpublications, suborigin)
+              subserver, subconflictlogrelid, subconflictlogdest, subslotname,
+              subsynccommit, subwalrcvtimeout, subpublications, suborigin)
     ON pg_subscription TO public;
 
 CREATE VIEW pg_stat_subscription_stats AS

@@ -97,15 +97,16 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
   </para>
 
   <para>
-   Note that adding tables/except tables/schemas to a publication that is
-   already subscribed to will require an
+   Note that adding, dropping, or setting tables or schemas in a publication
+   that is already subscribed to will require an
    <link linkend="sql-altersubscription-params-refresh-publication">
    <literal>ALTER SUBSCRIPTION ... REFRESH PUBLICATION</literal></link> action
    on the subscribing side in order to become effective. Likewise altering a
-   publication to set <literal>ALL TABLES</literal> or to set or unset
-   <literal>ALL SEQUENCES</literal> also requires the subscriber to refresh the
-   publication. Note also that <literal>DROP TABLES IN SCHEMA</literal> will
-   not drop any schema tables that were specified using
+   publication to set <literal>ALL TABLES</literal>, to change the
+   <literal>EXCEPT</literal> list, or to set <literal>ALL SEQUENCES</literal>
+   also requires the subscriber to refresh the publication. Note also that
+   <literal>DROP TABLES IN SCHEMA</literal> will not drop any schema tables
+   that were specified using
    <link linkend="sql-createpublication-params-for-table"><literal>FOR TABLE</literal></link>/
    <literal>ADD TABLE</literal>.
   </para>
@@ -149,7 +150,7 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
   <title>Parameters</title>
 
   <variablelist>
-   <varlistentry>
+   <varlistentry id="sql-alterpublication-params-name">
     <term><replaceable class="parameter">name</replaceable></term>
     <listitem>
      <para>
@@ -158,15 +159,17 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
     </listitem>
    </varlistentry>
 
-   <varlistentry>
+   <varlistentry id="sql-alterpublication-params-table-name">
     <term><replaceable class="parameter">table_name</replaceable></term>
     <listitem>
      <para>
       Name of an existing table.  If <literal>ONLY</literal> is specified before the
-      table name, only that table is affected.  If <literal>ONLY</literal> is not
-      specified, the table and all its descendant tables (if any) are
-      affected.  Optionally, <literal>*</literal> can be specified after the table
-      name to explicitly indicate that descendant tables are included.
+      <replaceable class="parameter">table_name</replaceable>, only that table
+      is affected.  If <literal>ONLY</literal> is not specified, the table and
+      all its descendant tables (if any) are affected.  Optionally,
+      <literal>*</literal> can be specified after the
+      <replaceable class="parameter">table_name</replaceable> to explicitly
+      indicate that descendant tables are included.
      </para>
 
      <para>
@@ -189,7 +192,17 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
     </listitem>
    </varlistentry>
 
-   <varlistentry>
+   <varlistentry id="sql-alterpublication-params-column-name">
+    <term><replaceable class="parameter">column_name</replaceable></term>
+    <listitem>
+     <para>
+      Name of an existing column of
+      <replaceable class="parameter">table_name</replaceable>.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="sql-alterpublication-params-schema-name">
     <term><replaceable class="parameter">schema_name</replaceable></term>
     <listitem>
      <para>
@@ -198,7 +211,7 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
     </listitem>
    </varlistentry>
 
-   <varlistentry>
+   <varlistentry id="sql-alterpublication-params-set">
     <term><literal>SET ( <replaceable class="parameter">publication_parameter</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] )</literal></term>
     <listitem>
      <para>
@@ -224,7 +237,7 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
     </listitem>
    </varlistentry>
 
-   <varlistentry>
+   <varlistentry id="sql-alterpublication-params-new-owner">
     <term><replaceable class="parameter">new_owner</replaceable></term>
     <listitem>
      <para>
@@ -233,7 +246,7 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
     </listitem>
    </varlistentry>
 
-   <varlistentry>
+   <varlistentry id="sql-alterpublication-params-new-name">
     <term><replaceable class="parameter">new_name</replaceable></term>
     <listitem>
      <para>
@@ -267,14 +280,14 @@ ALTER PUBLICATION mypublication SET TABLE users (user_id, firstname, lastname), 
 </programlisting></para>
 
   <para>
-   Replace the table list in the publication's EXCEPT clause:
+   Replace the table list in the publication's <literal>EXCEPT</literal> clause:
 <programlisting>
 ALTER PUBLICATION mypublication SET ALL TABLES EXCEPT (TABLE users, departments);
 </programlisting></para>
 
   <para>
-   Reset the publication to be a FOR ALL TABLES publication with no excluded
-   tables:
+   Reset the publication to be a <literal>FOR ALL TABLES</literal> publication
+   with no excluded tables:
 <programlisting>
 ALTER PUBLICATION mypublication SET ALL TABLES;
 </programlisting></para>

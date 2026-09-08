@@ -95,7 +95,15 @@ CATALOG(pg_subscription,6100,SubscriptionRelationId) BKI_SHARED_RELATION BKI_ROW
 	Oid			subserver BKI_LOOKUP_OPT(pg_foreign_server);	/* If connection uses
 																 * server */
 
+	Oid			subconflictlogrelid;	/* Relid of the conflict log table. */
 #ifdef CATALOG_VARLEN			/* variable-length fields start here */
+
+	/*
+	 * Strategy for logging replication conflicts: 'log' - server log only,
+	 * 'table' - conflict log table only, 'all' - both log and table.
+	 */
+	text		subconflictlogdest BKI_FORCE_NOT_NULL;
+
 	/* Connection string to the publisher */
 	text		subconninfo;	/* Set if connecting with connection string */
 
@@ -164,13 +172,14 @@ typedef struct Subscription
 									 * and the retention duration has not
 									 * exceeded max_retention_duration, when
 									 * defined */
-	char	   *conninfo;		/* Connection string to the publisher */
+	Oid			conflictlogrelid;	/* conflict log table Oid */
 	char	   *slotname;		/* Name of the replication slot */
 	char	   *synccommit;		/* Synchronous commit setting for worker */
 	char	   *walrcvtimeout;	/* wal_receiver_timeout setting for worker */
 	List	   *publications;	/* List of publication names to subscribe to */
 	char	   *origin;			/* Only publish data originating from the
 								 * specified origin */
+	char	   *conflictlogdest;	/* Conflict log destination */
 } Subscription;
 
 #ifdef EXPOSE_TO_CLIENT_CODE
@@ -212,8 +221,8 @@ typedef struct Subscription
 
 #endif							/* EXPOSE_TO_CLIENT_CODE */
 
-extern Subscription *GetSubscription(Oid subid, bool missing_ok,
-									 bool aclcheck);
+extern Subscription *GetSubscription(Oid subid, bool missing_ok);
+extern char *SubscriptionConninfo(Subscription *sub);
 extern void DisableSubscription(Oid subid);
 
 extern int	CountDBSubscriptions(Oid dbid);

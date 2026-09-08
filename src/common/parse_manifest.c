@@ -15,6 +15,7 @@
 
 #include "common/jsonapi.h"
 #include "common/parse_manifest.h"
+#include "common/pg_parse_lsn.h"
 
 /*
  * Semantic states for JSON manifest parsing.
@@ -119,7 +120,6 @@ pg_noreturn static void json_manifest_parse_failure(JsonManifestParseContext *co
 
 static int	hexdecode_char(char c);
 static bool hexdecode_string(uint8 *result, char *input, int nbytes);
-static bool parse_xlogrecptr(XLogRecPtr *result, char *input);
 
 /*
  * Set up for incremental parsing of the manifest.
@@ -631,7 +631,7 @@ json_manifest_finalize_system_identifier(JsonManifestParseState *parse)
 
 	/* Parse system identifier. */
 	system_identifier = strtou64(parse->manifest_system_identifier, &ep, 10);
-	if (*ep)
+	if (ep == parse->manifest_system_identifier || *ep)
 		json_manifest_parse_failure(parse->context,
 									"system identifier in manifest not an integer");
 
@@ -688,7 +688,7 @@ json_manifest_finalize_file(JsonManifestParseState *parse)
 
 	/* Parse size. */
 	size = strtou64(parse->size, &ep, 10);
-	if (*ep)
+	if (ep == parse->size || *ep)
 		json_manifest_parse_failure(parse->context,
 									"file size is not an integer");
 
@@ -766,13 +766,13 @@ json_manifest_finalize_wal_range(JsonManifestParseState *parse)
 
 	/* Parse timeline. */
 	tli = strtoul(parse->timeline, &ep, 10);
-	if (*ep)
+	if (ep == parse->timeline || *ep)
 		json_manifest_parse_failure(parse->context,
 									"timeline is not an integer");
-	if (!parse_xlogrecptr(&start_lsn, parse->start_lsn))
+	if (!pg_parse_lsn(parse->start_lsn, &start_lsn))
 		json_manifest_parse_failure(parse->context,
 									"could not parse start LSN");
-	if (!parse_xlogrecptr(&end_lsn, parse->end_lsn))
+	if (!pg_parse_lsn(parse->end_lsn, &end_lsn))
 		json_manifest_parse_failure(parse->context,
 									"could not parse end LSN");
 
@@ -930,20 +930,5 @@ hexdecode_string(uint8 *result, char *input, int nbytes)
 		result[i] = n1 * 16 + n2;
 	}
 
-	return true;
-}
-
-/*
- * Parse an XLogRecPtr expressed using the usual string format.
- */
-static bool
-parse_xlogrecptr(XLogRecPtr *result, char *input)
-{
-	uint32		hi;
-	uint32		lo;
-
-	if (sscanf(input, "%X/%08X", &hi, &lo) != 2)
-		return false;
-	*result = ((uint64) hi) << 32 | lo;
 	return true;
 }
